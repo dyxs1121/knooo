@@ -107,6 +107,10 @@ struct CreditCard: Identifiable, Codable, Hashable {
     var remind: Bool
     var remindDays: Int
     var items: [Transaction]
+    /// 卡面主题 id（内置主题库）；可选字段保证旧数据解码兼容
+    var theme: String? = nil
+    /// 自定义卡面照片（压缩后的 JPEG）；优先于主题渐变显示
+    var photoData: Data? = nil
 
     var short: String {
         let s = bank.replacingOccurrences(of: "银行", with: "")
@@ -221,6 +225,15 @@ final class Store: ObservableObject {
         }
         let list = map.map { (name: $0.key, value: $0.value, color: $0.key) }
         return list.sorted { $0.value > $1.value }
+    }
+
+    // MARK: 记账
+
+    /// 手动记一笔消费，插入到该卡流水的最前面
+    func addTransaction(cardID: UUID, tx: Transaction) {
+        guard let i = cards.firstIndex(where: { $0.id == cardID }) else { return }
+        cards[i].items.insert(tx, at: 0)
+        save()
     }
 
     // MARK: 活动操作

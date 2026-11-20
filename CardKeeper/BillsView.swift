@@ -1,8 +1,10 @@
 import SwiftUI
+import UIKit
 
 struct BillsView: View {
     @EnvironmentObject var store: Store
     @State private var filter: UUID? = nil
+    @State private var adding = false
 
     var body: some View {
         ZStack {
@@ -21,7 +23,7 @@ struct BillsView: View {
                         .padding(.horizontal, 20)
                         .padding(.top, 14)
 
-                    SectionHeader(title: "消费明细", trailing: "\(rows.count) 笔")
+                    SectionHeader(title: "消费明细", trailing: "\(rows.count) 笔 · 点右上 + 记一笔")
                         .padding(.horizontal, 20)
 
                     detailList
@@ -30,18 +32,37 @@ struct BillsView: View {
                 }
             }
         }
+        .sheet(isPresented: $adding) {
+            AddTransactionView(prefillCardID: filter).environmentObject(store)
+        }
     }
 
     // MARK: 头部
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(Fmt.todayLine())
-                .font(.system(size: 12.5))
-                .foregroundColor(Palette.sub)
-            Text("账单")
-                .font(.system(size: 29, weight: .bold))
-                .foregroundColor(Palette.text)
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(Fmt.todayLine())
+                    .font(.system(size: 12.5))
+                    .foregroundColor(Palette.sub)
+                Text("账单")
+                    .font(.system(size: 29, weight: .bold))
+                    .foregroundColor(Palette.text)
+            }
+
+            Spacer()
+
+            Button {
+                adding = true
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(Palette.text)
+                    .frame(width: 38, height: 38)
+                    .background(Color(hex: "767680").opacity(0.12))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
         }
     }
 
@@ -245,6 +266,115 @@ struct BillRow: Identifiable {
     let id: UUID
     var tx: Transaction
     var card: CreditCard
+}
+
+// MARK: - 记一笔
+
+struct AddTransactionView: View {
+    @EnvironmentObject var store: Store
+    @Environment(\.dismiss) var dismiss
+
+    static let categories = ["餐饮", "购物", "加油", "超市", "交通", "订阅", "娱乐", "其他"]
+
+    @State private var cardID: UUID?
+    @State private var amountText = ""
+    @State private var merchant = ""
+    @State private var category = "购物"
+    @State private var date = Date()
+    /// Picker selection 必须是稳定值，不能每次求值生成新 UUID
+    @State private var fallbackCardID = UUID()
+
+    let prefillCardID: UUID?
+
+    init(prefillCardID: UUID? = nil) {
+        self.prefillCardID = prefillCardID
+    }
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("所属卡片") {
+                    Picker("卡片", selection: Binding(
+                        get: { cardID ?? prefillCardID ?? store.cards.first?.id ?? fallbackCardID },
+                        set: { cardID = $0 }
+                    )) {
+                        ForEach(store.cards) { c in
+                            Text(c.bank + " ••" + c.last4).tag(c.id)
+                        }
+                    }
+                }
+
+                Section("消费信息") {
+                    HStack {
+                        Text("金额")
+                        Spacer()
+                        TextField("0.00", text: $amountText)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 120)
+                    }
+                    TextField("商户名称，如 星巴克", text: $merchant)
+                    Picker("分类", selection: $category) {
+                        ForEach(Self.categories, id: \.self) { c in
+                            Text(c).tag(c)
+                        }
+                    }
+                    DatePicker("日期", selection: $date, displayedComponents: .date)
+                }
+
+                Section {
+                    Text("记完会自动计入该卡的账单总额、本期应还和统计图表。")
+                        .font(.system(size: 12))
+                        .foregroundColor(Palette.sub)
+                }
+
+                Section {
+                    Button {
+                        save()
+                    } label: {
+                        Text("保存这笔消费")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 6)
+                    }
+                    .listRowBackground(Palette.primaryButton)
+                }
+            }
+            .navigationTitle("记一笔")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("取消") { dismiss() }
+                }
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button("完成") { hideKeyboard() }
+                }
+            }
+            .onAppear {
+                if cardID == nil { cardID = prefillCardID ?? store.cards.first?.id }
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    private func hideKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
+                                        to: nil, from: nil, for: nil)
+    }
+
+    private func save() {
+        let amount = Double(amountText) ?? 0
+        guard amount > 0, let cid = cardID, store.card(cid) != nil else { return }
+        let name = merchant.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tx = Transaction(merchant: name.isEmpty ? "消费" : name,
+                             category: category,
+                             amount: amount,
+                             date: date)
+        store.addTransaction(cardID: cid, tx: tx)
+        dismiss()
+    }
 }
 
 struct DayGroup: Identifiable {

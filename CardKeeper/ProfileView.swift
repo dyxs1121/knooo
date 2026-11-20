@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import PhotosUI
 
 struct ProfileView: View {
     @EnvironmentObject var store: Store
@@ -308,6 +310,13 @@ struct CardEditorView: View {
 
     @State private var confirmDelete = false
     @State private var showError = false
+    /// 卡面图片来源：拍照 / 相册（iOS 15 上同视图只能挂一个 sheet，用枚举统一驱动）
+    @State private var pickSource: PickSource?
+
+    private enum PickSource: String, Identifiable {
+        case camera, library
+        var id: String { rawValue }
+    }
 
     init(card: CreditCard, isNew: Bool = false) {
         _card = State(initialValue: card)
@@ -315,6 +324,10 @@ struct CardEditorView: View {
     }
 
     private var organizations: [String] { ["银联", "VISA", "Mastercard", "AE", "JCB"] }
+
+    private var cameraAvailable: Bool {
+        UIImagePickerController.isSourceTypeAvailable(.camera)
+    }
 
     var body: some View {
         NavigationView {
@@ -343,6 +356,50 @@ struct CardEditorView: View {
                             .keyboardType(.numberPad)
                             .multilineTextAlignment(.trailing)
                             .frame(width: 90)
+                    }
+                }
+
+                Section("卡面") {
+                    themeSelector
+
+                    HStack(spacing: 18) {
+                        if cameraAvailable {
+                            Button {
+                                pickSource = .camera
+                            } label: {
+                                Label("拍照", systemImage: "camera")
+                            }
+                        }
+                        Button {
+                            pickSource = .library
+                        } label: {
+                            Label("从相册选择", systemImage: "photo.on.rectangle")
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 15))
+
+                    if let data = card.photoData, let ui = UIImage(data: data) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Image(uiImage: ui)
+                                .resizable()
+                                .scaledToFill()
+                                .frame(height: 110)
+                                .frame(maxWidth: .infinity)
+                                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .stroke(Palette.line, lineWidth: 0.5)
+                                )
+
+                            Button(role: .destructive) {
+                                card.photoData = nil
+                            } label: {
+                                Text("移除自定义卡面，恢复主题配色")
+                                    .font(.system(size: 13))
+                            }
+                        }
+                        .padding(.vertical, 2)
                     }
                 }
 
@@ -438,8 +495,89 @@ struct CardEditorView: View {
                 }
                 Button("取消", role: .cancel) { }
             }
+            .sheet(item: $pickSource) { source in
+                switch source {
+                case .camera:
+                    CameraImagePicker { img in
+                        card.photoData = compressedCardImage(img)
+                    }
+                case .library:
+                    PhotoLibraryPicker { img in
+                        card.photoData = compressedCardImage(img)
+                    }
+                }
+            }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    // MARK: 卡面主题选择器
+
+    private var themeSelector: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 12) {
+                ForEach(CardTheme.all) { theme in
+                    themeChip(theme)
+                }
+            }
+            .padding(.vertical, 3)
+        }
+    }
+
+    private func themeChip(_ theme: CardTheme) -> some View {
+        let selected = (card.theme == theme.id && card.photoData == nil)
+            || (card.theme == nil && card.photoData == nil && card.colorA == theme.a)
+
+        return Button {
+            card.theme = theme.id
+            card.colorA = theme.a
+            card.colorB = theme.b
+            card.photoData = nil
+        } label: {
+            VStack(spacing: 5) {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(LinearGradient(colors: [Color(hex: theme.a), Color(hex: theme.b)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
+                    .frame(width: 64, height: 40)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(selected ? Palette.blue : Color.white.opacity(0.001), lineWidth: 2.5)
+                    )
+                    .overlay(
+                        Group {
+                            if selected {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 14))
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                                    .padding(4)
+                            }
+                        }
+                    )
+
+                Text(theme.name)
+                    .font(.system(size: 10, weight: selected ? .semibold : .regular))
+                    .foregroundColor(selected ? Palette.blue : Palette.sub)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 压缩照片：最长边限宽 900，JPEG 0.75，避免撑爆 UserDefaults
+    private func compressedCardImage(_ image: UIImage) -> Data? {
+        var img = image
+        let maxWidth: CGFloat = 900
+        if img.size.width > maxWidth {
+            let ratio = maxWidth / img.size.width
+            let newSize = CGSize(width: maxWidth, height: img.size.height * ratio)
+            UIGraphicsBeginImageContextWithOptions(newSize, true, 2)
+            img.draw(in: CGRect(origin: .zero, size: newSize))
+            if let scaled = UIGraphicsGetImageFromCurrentImageContext() {
+                img = scaled
+            }
+            UIGraphicsEndImageContext()
+        }
+        return img.jpegData(compressionQuality: 0.75)
     }
 
     private func save() {
@@ -472,5 +610,78 @@ struct CardEditorView: View {
         store.save()
         Notifier.shared.refresh(store: store)
         dismiss()
+    }
+}
+
+// MARK: - 拍照选卡面（iOS 15 兼容）
+
+struct CameraImagePicker: UIViewControllerRepresentable {
+    var onImage: (UIImage) -> Void
+    @Environment(\.dismiss) var dismiss
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) { }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let parent: CameraImagePicker
+        init(_ parent: CameraImagePicker) { self.parent = parent }
+
+        func imagePickerController(_ picker: UIImagePickerController,
+                                   didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]) {
+            if let img = info[.originalImage] as? UIImage {
+                parent.onImage(img)
+            }
+            parent.dismiss()
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.dismiss()
+        }
+    }
+}
+
+// MARK: - 相册选卡面（PHPicker 无需相册权限）
+
+struct PhotoLibraryPicker: UIViewControllerRepresentable {
+    var onImage: (UIImage) -> Void
+    @Environment(\.dismiss) var dismiss
+
+    func makeUIViewController(context: Context) -> PHPickerViewController {
+        var config = PHPickerConfiguration()
+        config.filter = .images
+        config.selectionLimit = 1
+        let picker = PHPickerViewController(configuration: config)
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: PHPickerViewController, context: Context) { }
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    final class Coordinator: NSObject, PHPickerViewControllerDelegate {
+        let parent: PhotoLibraryPicker
+        init(_ parent: PhotoLibraryPicker) { self.parent = parent }
+
+        func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
+            parent.dismiss()
+            guard let item = results.first?.itemProvider,
+                  item.canLoadObject(ofClass: UIImage.self) else { return }
+            item.loadObject(ofClass: UIImage.self) { object, _ in
+                if let img = object as? UIImage {
+                    DispatchQueue.main.async {
+                        self.parent.onImage(img)
+                    }
+                }
+            }
+        }
     }
 }

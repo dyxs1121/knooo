@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 // MARK: - 颜色
 
@@ -227,15 +228,55 @@ struct PrimaryButton: View {
     }
 }
 
+// MARK: - 卡面主题库（原创配色，无版权问题）
+
+struct CardTheme: Identifiable {
+    let id: String
+    let name: String
+    let a: String   // 渐变起始色
+    let b: String   // 渐变结束色
+}
+
+extension CardTheme {
+    static let all: [CardTheme] = [
+        CardTheme(id: "obsidian", name: "曜石黑", a: "1B1D2B", b: "3B4067"),
+        CardTheme(id: "midnight", name: "深空蓝", a: "0F2027", b: "2C5364"),
+        CardTheme(id: "ocean",    name: "海洋蓝", a: "15303C", b: "1F5E70"),
+        CardTheme(id: "emerald",  name: "翡翠绿", a: "0B3D2E", b: "1F7A5C"),
+        CardTheme(id: "forest",   name: "墨松绿", a: "16281F", b: "2E5240"),
+        CardTheme(id: "burgundy", name: "勃艮第", a: "3A1F2E", b: "6B2E44"),
+        CardTheme(id: "gold",     name: "鎏金",   a: "3D2E08", b: "8A6A1D"),
+        CardTheme(id: "violet",   name: "紫晶",   a: "2A1B3D", b: "6E5BFF"),
+        CardTheme(id: "aurora",   name: "极光青", a: "0F3443", b: "27878B"),
+        CardTheme(id: "graphite", name: "钛灰",   a: "20242B", b: "3F4650"),
+        CardTheme(id: "sunset",   name: "落日橙", a: "4A1942", b: "A14E3C"),
+        CardTheme(id: "plum",     name: "黛蓝",   a: "1F2A44", b: "5A6BD8")
+    ]
+
+    static func by(id: String) -> CardTheme? {
+        all.first { $0.id == id }
+    }
+}
+
 // MARK: - 卡面
 
 struct CardFace: View {
     var card: CreditCard
     var height: CGFloat = 180
 
-    private var background: LinearGradient {
-        LinearGradient(colors: [Color(hex: card.colorA), Color(hex: card.colorB)],
-                       startPoint: .topLeading, endPoint: .bottomTrailing)
+    /// 背景：有自定义照片用照片（加暗化保证文字可读），否则用主题渐变
+    private var backgroundLayer: AnyView {
+        if let data = card.photoData, let ui = UIImage(data: data) {
+            return AnyView(
+                Image(uiImage: ui)
+                    .resizable()
+                    .scaledToFill()
+            )
+        }
+        return AnyView(
+            LinearGradient(colors: [Color(hex: card.colorA), Color(hex: card.colorB)],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+        )
     }
 
     var body: some View {
@@ -248,7 +289,16 @@ struct CardFace: View {
         }
         .padding(17)
         .frame(height: height)
-        .background(background)
+        .background(backgroundLayer)
+        .overlay(
+            Group {
+                // 照片卡面时叠一层暗色渐变，保证白色文字始终可读
+                if card.photoData != nil {
+                    LinearGradient(colors: [Color.black.opacity(0.32), Color.black.opacity(0.10)],
+                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                }
+            }
+        )
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 22, style: .continuous)
