@@ -39,9 +39,9 @@ workflows:
       # ---------- 2. 编译（Release / arm64 / 不签名） ----------
       - name: 编译未签名 App
         script: |
-          set -e
-          cd "$(dirname "$(find . -maxdepth 4 -type d -name 'CardKeeper.xcodeproj' | head -n 1)")"
           set -o pipefail
+          cd "$(dirname "$(find . -maxdepth 4 -type d -name 'CardKeeper.xcodeproj' | head -n 1)")"
+          set +e
           xcodebuild \
             -project CardKeeper.xcodeproj \
             -scheme CardKeeper \
@@ -54,6 +54,18 @@ workflows:
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee xcodebuild.log
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -ne 0 ]; then
+            echo ""
+            echo "=========== 编译失败，具体错误行（error:） ==========="
+            grep -n "error:" xcodebuild.log | head -n 60 || echo "（日志中没有 error: 行）"
+            echo "=========== 日志最后 60 行 ==========="
+            tail -n 60 xcodebuild.log
+            echo "======================================================"
+            exit 1
+          fi
+          echo "✅ 编译成功"
 
       # ---------- 3. 打包成 IPA ----------
       - name: 打包 IPA

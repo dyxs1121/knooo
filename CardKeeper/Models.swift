@@ -83,8 +83,9 @@ struct Activity: Identifiable, Codable, Hashable {
 
     init(cardID: UUID, title: String, detail: String, kind: ActivityKind, target: Double,
          current: Double = 0, deadline: Date, remind: RemindRule = .weeklySunday,
-         steps: [ActivityStep] = [], reward: Double = 0, earned: Double = 0,
-         alertAt: Date? = nil, leadMinutes: Int = 0) {
+         reward: Double = 0, earned: Double = 0,
+         alertAt: Date? = nil, leadMinutes: Int = 0,
+         steps: [ActivityStep] = []) {
         self.cardID = cardID
         self.title = title
         self.detail = detail
