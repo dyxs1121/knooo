@@ -8,12 +8,14 @@ struct HomeView: View {
         case edit(CreditCard)
         case add
         case owners
+        case addOwner
 
         var id: String {
             switch self {
             case .edit(let card): return card.id.uuidString
             case .add: return "new-card"
             case .owners: return "manage-owners"
+            case .addOwner: return "new-owner"
             }
         }
     }
@@ -98,7 +100,7 @@ struct HomeView: View {
             }
         }
         .animation(.easeOut(duration: 0.22), value: drawerOpen)
-        .sheet(item: $sheet) { item in
+        .sheet(item: $sheet, onDismiss: { closeDrawer() }) { item in
             switch item {
             case .edit(let card):
                 CardEditorView(card: card).environmentObject(store)
@@ -107,6 +109,11 @@ struct HomeView: View {
                     .environmentObject(store)
             case .owners:
                 OwnerManagerView().environmentObject(store)
+            case .addOwner:
+                AddOwnerView(onAdded: { name in
+                    ownerFilter = name
+                })
+                .environmentObject(store)
             }
         }
     }
@@ -176,10 +183,26 @@ struct HomeView: View {
                 .background(Color.white.opacity(0.10))
 
             Button {
-                closeDrawer()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
-                    sheet = .owners
+                sheet = .addOwner
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "person.badge.plus")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("新增归属人")
+                        .font(.system(size: 14, weight: .medium))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.35))
                 }
+                .foregroundColor(.white.opacity(0.85))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 15)
+            }
+            .buttonStyle(.plain)
+
+            Button {
+                sheet = .owners
             } label: {
                 HStack(spacing: 9) {
                     Image(systemName: "slider.horizontal.3")
@@ -193,10 +216,16 @@ struct HomeView: View {
                 }
                 .foregroundColor(.white.opacity(0.85))
                 .padding(.horizontal, 20)
-                .padding(.vertical, 16)
+                .padding(.vertical, 15)
             }
             .buttonStyle(.plain)
-            .padding(.bottom, 20)
+
+            Text("卡管家 v1.6")
+                .font(.system(size: 10))
+                .foregroundColor(.white.opacity(0.28))
+                .padding(.horizontal, 20)
+                .padding(.top, 2)
+                .padding(.bottom, 20)
         }
         .frame(width: 268)
         .frame(maxHeight: .infinity)
@@ -403,6 +432,22 @@ struct HomeView: View {
                 warning: true))
         }
 
+        // 年费即将扣取
+        for c in store.cards where c.feeInfo.amount > 0 && c.feeInfo.remind {
+            let left = store.feeDaysLeft(for: c)
+            if left <= c.feeInfo.remindDays {
+                let waived = store.feeWaived(c)
+                list.append(AlertItem(
+                    icon: "费",
+                    color: waived ? Palette.green : Palette.orange,
+                    title: c.short + " 年费 " + Fmt.yuan(c.feeInfo.amount),
+                    subtitle: Fmt.monthDay(store.nextFeeDate(for: c)) + " 扣取 · "
+                        + store.feeProgressText(c) + (waived ? " · 已达标" : ""),
+                    trailing: waived ? "可免" : "剩 \(left) 天",
+                    warning: !waived))
+            }
+        }
+
         for a in store.activities.filter({ !$0.isDone }).prefix(2) {
             let left = max(0, DateHelp.daysToDeadline(a.deadline))
             list.append(AlertItem(
@@ -501,6 +546,7 @@ struct OwnerManagerView: View {
     @Environment(\.dismiss) var dismiss
 
     @State private var newName = ""
+    @State private var tip = ""
     @State private var editingIndex: Int? = nil
     @State private var editingName = ""
     @State private var showRename = false
@@ -509,13 +555,27 @@ struct OwnerManagerView: View {
         NavigationView {
             Form {
                 Section {
-                    HStack {
-                        TextField("如 父亲 / 母亲 / 配偶", text: $newName)
-                        Button("添加") {
-                            store.addOwner(newName)
-                            newName = ""
+                    TextField("如 父亲 / 母亲 / 配偶", text: $newName)
+
+                    Button {
+                        let n = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !n.isEmpty else { return }
+                        store.addOwner(n)
+                        newName = ""
+                        tip = "已新增「\(n)」"
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus.circle.fill")
+                            Text("添加到分类列表")
                         }
-                        .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    if !tip.isEmpty {
+                        Text(tip)
+                            .font(.system(size: 12))
+                            .foregroundColor(Palette.green)
                     }
                 } header: {
                     Text("新增分类")
@@ -601,6 +661,62 @@ struct OwnerManagerView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("取消") { showRename = false }
+                }
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+    }
+}
+
+// MARK: - 新增归属人
+
+struct AddOwnerView: View {
+    @EnvironmentObject var store: Store
+    @Environment(\.dismiss) var dismiss
+
+    private let onAdded: (String) -> Void
+
+    @State private var name = ""
+
+    init(onAdded: @escaping (String) -> Void = { _ in }) {
+        self.onAdded = onAdded
+    }
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section {
+                    TextField("如 父亲 / 母亲 / 配偶", text: $name)
+                } header: {
+                    Text("新增归属人")
+                } footer: {
+                    Text("新增后可按归属人筛选卡片，编辑卡片时也能选中它。")
+                        .font(.system(size: 11.5))
+                }
+
+                Section {
+                    Button {
+                        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !n.isEmpty else { return }
+                        store.addOwner(n)
+                        onAdded(n)
+                        dismiss()
+                    } label: {
+                        Text("保存")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                    }
+                    .listRowBackground(Palette.primaryButton)
+                    .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .navigationTitle("新增归属人")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("取消") { dismiss() }
                 }
             }
         }

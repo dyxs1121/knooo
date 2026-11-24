@@ -7,6 +7,8 @@ struct ProfileView: View {
 
     @State private var editing: CreditCard?
     @State private var confirmReset = false
+    /// 「我的」页新增归属人输入框
+    @State private var newOwner = ""
 
     var body: some View {
         ZStack {
@@ -26,6 +28,12 @@ struct ProfileView: View {
                         .padding(.horizontal, 20)
 
                     remindCard
+                        .padding(.horizontal, 20)
+
+                    SectionHeader(title: "归属人", trailing: "\(store.owners.count) 个")
+                        .padding(.horizontal, 20)
+
+                    ownerCard
                         .padding(.horizontal, 20)
 
                     SectionHeader(title: "卡片管理", trailing: "\(store.cards.count) 张")
@@ -215,6 +223,65 @@ struct ProfileView: View {
         }
     }
 
+    // MARK: 归属人
+
+    private var ownerCard: some View {
+        CardShell {
+            VStack(spacing: 0) {
+                ForEach(Array(store.owners.enumerated()), id: \.offset) { index, o in
+                    HStack(spacing: 12) {
+                        IconBadge(text: String(o.prefix(1)), color: Palette.purple)
+                        Text(o)
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(Palette.text)
+                        Spacer()
+                        Text("\(store.ownedCards(o).count) 张")
+                            .font(.system(size: 12))
+                            .foregroundColor(Palette.sub)
+                    }
+                    .padding(.horizontal, 15)
+                    .padding(.vertical, 12)
+
+                    if index < store.owners.count - 1 {
+                        RowDivider(inset: 48)
+                    }
+                }
+
+                RowDivider(inset: 0)
+
+                VStack(spacing: 9) {
+                    TextField("新增归属人，如 父亲 / 母亲", text: $newOwner)
+                        .font(.system(size: 13.5))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(Color(hex: "767680").opacity(0.08))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+
+                    Button {
+                        let n = newOwner.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !n.isEmpty else { return }
+                        store.addOwner(n)
+                        newOwner = ""
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus.circle.fill")
+                            Text("新增归属人")
+                        }
+                        .font(.system(size: 13.5, weight: .medium))
+                        .foregroundColor(Palette.blue)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(Palette.blue.opacity(0.09))
+                        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(newOwner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                .padding(15)
+            }
+        }
+    }
+
     // MARK: 卡片管理
 
     private var cardManageList: some View {
@@ -262,6 +329,14 @@ struct ProfileView: View {
                                      (card.remind ? "提前 \(card.remindDays) 天提醒" : "未开启提醒"))
                                     .font(.system(size: 11.5))
                                     .foregroundColor(Palette.sub)
+                                    .lineLimit(1)
+
+                                Text(card.feeInfo.amount > 0
+                                     ? "年费 " + Fmt.yuan(card.feeInfo.amount) + " · " + store.feeProgressText(card)
+                                     : "免年费卡")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(card.feeInfo.amount > 0 && !store.feeWaived(card)
+                                                     ? Palette.orange : Palette.sub)
                                     .lineLimit(1)
                             }
 
@@ -315,7 +390,7 @@ struct ProfileView: View {
                         Text("版本")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(Palette.text)
-                        Text("1.4 · 本地存储，数据不上传")
+                        Text("1.6 · 本地存储，数据不上传")
                             .font(.system(size: 11.5))
                             .foregroundColor(Palette.sub)
                     }
@@ -347,6 +422,14 @@ struct CardEditorView: View {
     @State private var isSupplementary = false
     /// 选中的主卡 id
     @State private var primaryID: UUID?
+    /// 新增归属人输入框
+    @State private var newOwnerName = ""
+    /// 新增成功提示
+    @State private var ownerTip = ""
+    /// 年费信息草稿
+    @State private var fee = CardFee()
+    /// 账单日前一天提醒
+    @State private var billRemindBefore = true
 
     private enum PickSource: String, Identifiable {
         case camera, library
@@ -355,6 +438,8 @@ struct CardEditorView: View {
 
     init(card: CreditCard, isNew: Bool = false, defaultOwner: String? = nil) {
         _card = State(initialValue: card)
+        _fee = State(initialValue: card.fee ?? CardFee())
+        _billRemindBefore = State(initialValue: card.billRemindBefore ?? true)
         self.isNew = isNew
         self.defaultOwner = defaultOwner
     }
@@ -449,7 +534,7 @@ struct CardEditorView: View {
                     }
                 }
 
-                Section("归属与分类") {
+                Section {
                     Picker("归属人", selection: Binding(
                         get: { card.owner ?? store.owners.first ?? "本人" },
                         set: { card.owner = $0 }
@@ -458,6 +543,42 @@ struct CardEditorView: View {
                             Text(o).tag(o)
                         }
                     }
+                } header: {
+                    Text("归属与分类")
+                } footer: {
+                    Text("下拉里没有想要的分类，就在下面「新增归属人」新建一个，建完会自动选中。")
+                        .font(.system(size: 11.5))
+                }
+
+                Section {
+                    TextField("如 父亲 / 母亲 / 配偶", text: $newOwnerName)
+
+                    Button {
+                        let n = newOwnerName.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !n.isEmpty else { return }
+                        store.addOwner(n)
+                        card.owner = n
+                        newOwnerName = ""
+                        ownerTip = "已新增并选中「\(n)」"
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "plus.circle.fill")
+                            Text("新增归属人")
+                        }
+                        .frame(maxWidth: .infinity, alignment: .center)
+                    }
+                    .disabled(newOwnerName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                    if !ownerTip.isEmpty {
+                        Text(ownerTip)
+                            .font(.system(size: 12))
+                            .foregroundColor(Palette.green)
+                    }
+                } header: {
+                    Text("新增归属人")
+                } footer: {
+                    Text("已有分类可去首页左上角分类按钮 → 管理分类，批量改名或删除。")
+                        .font(.system(size: 11.5))
                 }
 
                 Section {
@@ -560,6 +681,106 @@ struct CardEditorView: View {
                     }
                 }
 
+                Section {
+                    HStack {
+                        Text("年费金额")
+                        Spacer()
+                        TextField("0", value: $fee.amount, format: .number)
+                            .keyboardType(.numberPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 110)
+                    }
+
+                    if fee.amount > 0 {
+                        Stepper("刷满 \(fee.waiveCount) 笔免年费", value: $fee.waiveCount, in: 0...60)
+                        HStack {
+                            Text("刷满金额免年费")
+                            Spacer()
+                            TextField("0", value: $fee.waiveAmount, format: .number)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 110)
+                        }
+                        Text("两项都填时满足任意一项即可免年费；留 0 表示不按该条件。")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(Palette.sub)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        HStack {
+                            Text("年费扣取月份")
+                            Spacer()
+                            Picker("", selection: $fee.month) {
+                                ForEach(1...12, id: \.self) { m in
+                                    Text("\(m) 月").tag(m)
+                                }
+                            }
+                            .labelsHidden()
+                            .pickerStyle(.menu)
+                        }
+                        Picker("扣取日", selection: $fee.day) {
+                            ForEach(1...28, id: \.self) { d in
+                                Text("每月 \(d) 日").tag(d)
+                            }
+                        }
+                        Toggle("年费到期提醒", isOn: $fee.remind)
+                            .tint(Palette.green)
+                        if fee.remind {
+                            Picker("提前提醒", selection: $fee.remindDays) {
+                                ForEach([3, 7, 15, 30, 60], id: \.self) { d in
+                                    Text("提前 \(d) 天").tag(d)
+                                }
+                            }
+                        }
+                    }
+                } header: {
+                    Text("年费与免年费")
+                } footer: {
+                    Text(fee.amount > 0
+                         ? "免年费规则：" + fee.ruleText + "。达标进度默认按本期账单估算，可在下面手动调整。"
+                         : "填 0 表示免年费卡（如多数附属卡）。填了金额才会出现免年费规则与提醒设置。")
+                        .font(.system(size: 11.5))
+                }
+
+                if fee.amount > 0, fee.hasRule {
+                    Section {
+                        Toggle("手动填写达标进度", isOn: $fee.manualMode)
+                            .tint(Palette.green)
+
+                        if fee.manualMode {
+                            Stepper("已刷 \(fee.manualCount) 笔", value: $fee.manualCount, in: 0...200)
+                            HStack {
+                                Text("已刷金额")
+                                Spacer()
+                                TextField("0", value: $fee.manualAmount, format: .number)
+                                    .keyboardType(.numberPad)
+                                    .multilineTextAlignment(.trailing)
+                                    .frame(width: 110)
+                            }
+                        } else {
+                            HStack {
+                                Text("按账单估算")
+                                Spacer()
+                                Text(store.feeProgressText(card))
+                                    .font(.system(size: 12.5))
+                                    .foregroundColor(Palette.sub)
+                            }
+                        }
+
+                        HStack {
+                            Text("达标状态")
+                            Spacer()
+                            Text(store.feeWaived(card) ? "已达标，可免年费" : "未达标，将收年费 " + Fmt.yuan(fee.amount))
+                                .font(.system(size: 12.5, weight: .medium))
+                                .foregroundColor(store.feeWaived(card) ? Palette.green : Palette.orange)
+                        }
+                    } header: {
+                        Text("免年费达标")
+                    } footer: {
+                        Text("把「手动填写」打开后可以用加减号自由调整已刷笔数与金额，图表会按你填的算。")
+                            .font(.system(size: 11.5))
+                    }
+                }
+
                 Section("账单周期") {
                     Picker("账单日（出账日）", selection: $card.billDay) {
                         ForEach(1...28, id: \.self) { day in
@@ -573,7 +794,7 @@ struct CardEditorView: View {
                     }
                 }
 
-                Section("提醒") {
+                Section {
                     Toggle("还款提醒", isOn: $card.remind)
                         .tint(Palette.green)
                     if card.remind {
@@ -583,6 +804,17 @@ struct CardEditorView: View {
                             }
                         }
                     }
+
+                    Toggle("账单日前一天提醒", isOn: $billRemindBefore)
+                        .tint(Palette.green)
+                    if billRemindBefore {
+                        Text("账单日前一天 09:00 提醒你：明天出账，今天还款最稳妥。")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(Palette.sub)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                } header: {
+                    Text("提醒")
                 }
 
                 Section {
@@ -744,6 +976,20 @@ struct CardEditorView: View {
         if card.limit < 1 {
             card.limit = 1
         }
+
+        // 年费：金额为 0 视为免年费卡，不保存规则
+        if fee.amount > 0 {
+            var f = fee
+            f.amount = max(0, fee.amount)
+            f.waiveAmount = max(0, fee.waiveAmount)
+            f.waiveCount = max(0, fee.waiveCount)
+            f.manualCount = max(0, fee.manualCount)
+            f.manualAmount = max(0, fee.manualAmount)
+            card.fee = f
+        } else {
+            card.fee = nil
+        }
+        card.billRemindBefore = billRemindBefore
 
         // 附属卡关系：勾选了就必须落到一张真实主卡上，否则视为独立卡
         if isSupplementary, let pid = primaryID ?? primaryCandidates.first?.id {

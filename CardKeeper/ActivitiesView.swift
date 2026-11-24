@@ -11,11 +11,13 @@ struct ActivitiesView: View {
     private enum Sheet: Identifiable {
         case detail(Activity)
         case add
+        case earnings
 
         var id: String {
             switch self {
             case .detail(let act): return act.id.uuidString
             case .add: return "new-activity"
+            case .earnings: return "earnings-list"
             }
         }
     }
@@ -58,6 +60,8 @@ struct ActivitiesView: View {
                 ActivityDetailView(activityID: act.id).environmentObject(store)
             case .add:
                 ActivityEditorView().environmentObject(store)
+            case .earnings:
+                EarningsListView().environmentObject(store)
             }
         }
     }
@@ -144,31 +148,40 @@ struct ActivitiesView: View {
         }
     }
 
-    /// 活动收益总览
+    /// 活动收益总览（点开看每一笔到账）
     private var earnStrip: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "yensign.circle.fill")
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundColor(Palette.orange)
+        Button {
+            sheet = .earnings
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "yensign.circle.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(Palette.orange)
 
-            Text("活动收益")
-                .font(.system(size: 12.5, weight: .medium))
-                .foregroundColor(Palette.text)
+                Text("活动收益")
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundColor(Palette.text)
 
-            Spacer()
+                Spacer()
 
-            Text("已到账 " + Fmt.yuan(store.totalEarned))
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundColor(Palette.green)
+                Text("已到账 " + Fmt.yuan(store.totalEarned))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Palette.green)
 
-            Text("预期 " + Fmt.yuan(store.totalReward))
-                .font(.system(size: 11.5))
-                .foregroundColor(Palette.sub)
+                Text("预期 " + Fmt.yuan(store.totalReward))
+                    .font(.system(size: 11.5))
+                    .foregroundColor(Palette.sub)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(Palette.sub)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(Palette.surface)
+            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 11)
-        .background(Palette.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .buttonStyle(.plain)
     }
 
     private var nearestHint: String {        let pending = store.activities.filter { !$0.isDone }
@@ -412,7 +425,7 @@ struct ActivityDetailView: View {
     @State private var amountText = ""
     @State private var confirmDelete = false
     @State private var rewardText = ""
-    @State private var earnedText = ""
+    @State private var earnAmountText = ""
 
     private var activity: Activity? {
         store.activities.first { $0.id == activityID }
@@ -504,7 +517,11 @@ struct ActivityDetailView: View {
     private func syncRewardFields() {
         guard let act = activity else { return }
         rewardText = act.reward > 0 ? numText(act.reward) : ""
-        earnedText = act.earned > 0 ? numText(act.earned) : ""
+    }
+
+    /// 当前活动名下的到账记录
+    private var earningRecords: [Earning] {
+        store.earnings(for: activityID)
     }
 
     private func numText(_ v: Double) -> String {
@@ -518,23 +535,81 @@ struct ActivityDetailView: View {
                     .font(.system(size: 12))
                     .foregroundColor(Palette.sub)
                 Spacer()
-                Text(act.earned > 0 ? "已到账 " + Fmt.yuan(act.earned) : "尚未到账")
+                Text(act.earned > 0 ? "累计到账 " + Fmt.yuan(act.earned) : "尚未到账")
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundColor(act.earned > 0 ? Palette.green : Palette.sub)
             }
 
             HStack(spacing: 10) {
                 rewardField(title: "预期奖励", text: $rewardText)
-                rewardField(title: "已到账", text: $earnedText)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("已到账合计")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(Palette.sub)
+                    HStack(spacing: 3) {
+                        Text("¥")
+                            .font(.system(size: 12))
+                            .foregroundColor(Palette.sub)
+                        Text(Fmt.raw(act.earned))
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundColor(Palette.green)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color(hex: "767680").opacity(0.08))
+                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                }
             }
             .padding(.top, 11)
 
+            if !earningRecords.isEmpty {
+                VStack(spacing: 0) {
+                    ForEach(earningRecords) { e in
+                        HStack(spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(e.note.isEmpty ? "到账" : e.note)
+                                    .font(.system(size: 12.5))
+                                    .foregroundColor(Palette.text)
+                                Text(Fmt.monthDay(e.date))
+                                    .font(.system(size: 10.5))
+                                    .foregroundColor(Palette.sub)
+                            }
+                            Spacer()
+                            Text("+" + Fmt.money(e.amount))
+                                .font(.system(size: 12.5, weight: .semibold))
+                                .foregroundColor(Palette.green)
+                            Button {
+                                store.deleteEarning(e.id)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Palette.red.opacity(0.85))
+                                    .padding(.leading, 4)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .padding(.vertical, 8)
+                        Divider()
+                    }
+                }
+                .padding(.top, 6)
+            }
+
             HStack(spacing: 8) {
+                TextField("到账金额", text: $earnAmountText)
+                    .keyboardType(.decimalPad)
+                    .font(.system(size: 13))
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+
                 Button {
-                    store.setEarned(activityID: activityID, earned: act.reward)
-                    syncRewardFields()
+                    let v = Double(earnAmountText) ?? 0
+                    guard v > 0 else { return }
+                    store.addEarning(activityID: activityID, amount: v, note: "手动记录")
+                    earnAmountText = ""
                 } label: {
-                    Text("按预期全部到账")
+                    Text("记一笔到账")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(Palette.blue)
                         .padding(.horizontal, 12)
@@ -543,15 +618,33 @@ struct ActivityDetailView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 }
                 .buttonStyle(.plain)
+            }
+            .padding(.top, 12)
+
+            HStack(spacing: 8) {
+                Button {
+                    let gap = act.reward - store.earnedTotal(for: activityID)
+                    if gap > 0 {
+                        store.addEarning(activityID: activityID, amount: gap, note: "按预期补足")
+                    }
+                } label: {
+                    Text("按预期补足")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Palette.green)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Palette.green.opacity(0.10))
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+                .buttonStyle(.plain)
 
                 Spacer()
 
                 Button {
                     store.setReward(activityID: activityID, reward: Double(rewardText) ?? 0)
-                    store.setEarned(activityID: activityID, earned: Double(earnedText) ?? 0)
                     syncRewardFields()
                 } label: {
-                    Text("保存收益")
+                    Text("保存预期")
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(.white)
                         .padding(.horizontal, 14)
@@ -561,7 +654,7 @@ struct ActivityDetailView: View {
                 }
                 .buttonStyle(.plain)
             }
-            .padding(.top, 11)
+            .padding(.top, 10)
         }
         .padding(16)
         .background(Palette.surface)
@@ -972,5 +1065,117 @@ struct ActivityEditorView: View {
         store.save()
         Notifier.shared.refresh(store: store)
         dismiss()
+    }
+}
+
+// MARK: - 收益明细（全部到账记录）
+
+struct EarningGroup: Identifiable {
+    var id: UUID
+    var title: String
+    var cardName: String
+    var records: [Earning]
+    var expected: Double
+
+    var total: Double { records.reduce(0) { $0 + $1.amount } }
+}
+
+struct EarningsListView: View {
+    @EnvironmentObject var store: Store
+    @Environment(\.dismiss) var dismiss
+
+    private var groups: [EarningGroup] {
+        var out: [EarningGroup] = []
+        for act in store.activities {
+            let recs = store.earnings(for: act.id)
+            if recs.isEmpty { continue }
+            out.append(EarningGroup(id: act.id,
+                                    title: act.title,
+                                    cardName: store.cardName(act.cardID),
+                                    records: recs,
+                                    expected: act.reward))
+        }
+        return out.sorted { $0.total > $1.total }
+    }
+
+    private var total: Double { store.earnings.reduce(0) { $0 + $1.amount } }
+
+    var body: some View {
+        NavigationView {
+            List {
+                Section {
+                    HStack(alignment: .firstTextBaseline) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("累计到账")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(Palette.sub)
+                            Text(Fmt.money(total))
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundColor(Palette.text)
+                        }
+                        Spacer()
+                        VStack(alignment: .trailing, spacing: 3) {
+                            Text("共 \(store.earnings.count) 笔")
+                                .font(.system(size: 11.5))
+                                .foregroundColor(Palette.sub)
+                            Text("预期合计 " + Fmt.yuan(store.totalReward))
+                                .font(.system(size: 11.5))
+                                .foregroundColor(Palette.sub)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
+                if groups.isEmpty {
+                    Section {
+                        Text("还没有到账记录。在活动详情页点「记一笔到账」即可累积。")
+                            .font(.system(size: 12.5))
+                            .foregroundColor(Palette.sub)
+                    }
+                } else {
+                    ForEach(groups) { g in
+                        Section {
+                            ForEach(g.records) { e in
+                                HStack(spacing: 10) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(e.note.isEmpty ? "到账" : e.note)
+                                            .font(.system(size: 13.5))
+                                            .foregroundColor(Palette.text)
+                                        Text(Fmt.monthDay(e.date) + " · " + g.cardName)
+                                            .font(.system(size: 10.5))
+                                            .foregroundColor(Palette.sub)
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                    Text("+" + Fmt.money(e.amount))
+                                        .font(.system(size: 13.5, weight: .semibold))
+                                        .foregroundColor(Palette.green)
+                                }
+                                .padding(.vertical, 2)
+                            }
+                            .onDelete { offsets in
+                                let ids = offsets.map { g.records[$0].id }
+                                for id in ids {
+                                    store.deleteEarning(id)
+                                }
+                            }
+                        } header: {
+                            Text(g.title)
+                        } footer: {
+                            Text("已到账 " + Fmt.yuan(g.total) + " · 预期 " + Fmt.yuan(g.expected))
+                        }
+                    }
+                }
+            }
+            .listStyle(.insetGrouped)
+            .navigationTitle("收益明细")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") { dismiss() }
+                }
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 }

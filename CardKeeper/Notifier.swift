@@ -25,6 +25,14 @@ final class Notifier {
             for card in cards where card.remind {
                 scheduleRepayment(card, center: center)
             }
+            for card in cards where card.billRemindBeforeOn {
+                scheduleBillBefore(card, center: center)
+            }
+        }
+
+        // 年费提醒独立于「出账提醒」开关
+        for card in cards where card.feeInfo.amount > 0 && card.feeInfo.remind {
+            scheduleAnnualFee(card, center: center)
         }
 
         if settings.actPush {
@@ -52,6 +60,55 @@ final class Notifier {
 
         let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: true)
         let request = UNNotificationRequest(identifier: "repay-" + card.id.uuidString,
+                                           content: content,
+                                           trigger: trigger)
+        center.add(request)
+    }
+
+    // MARK: 账单日前一天
+
+    private func scheduleBillBefore(_ card: CreditCard, center: UNUserNotificationCenter) {
+        var comps = DateComponents()
+        var day = (card.billDay - 1) % 28
+        if day <= 0 { day += 28 }
+        comps.day = day
+        comps.hour = 9
+        comps.minute = 0
+
+        let content = UNMutableNotificationContent()
+        content.title = card.bank + " 账单日前一天"
+        content.body = "明天 \(card.billDay) 日出账，习惯提前还款的话今天处理最稳妥。"
+        content.sound = .default
+
+        let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: true)
+        let request = UNNotificationRequest(identifier: "billbefore-" + card.id.uuidString,
+                                           content: content,
+                                           trigger: trigger)
+        center.add(request)
+    }
+
+    // MARK: 年费到期
+
+    private func scheduleAnnualFee(_ card: CreditCard, center: UNUserNotificationCenter) {
+        let f = card.feeInfo
+        guard f.amount > 0, f.remind else { return }
+
+        let feeDate = DateHelp.nextAnnual(month: f.month, day: f.day)
+        let fireDate = Calendar.current.date(byAdding: .day, value: -f.remindDays, to: feeDate) ?? feeDate
+        guard fireDate > Date() else { return }
+
+        var comps = Calendar.current.dateComponents([.year, .month, .day], from: fireDate)
+        comps.hour = 9
+        comps.minute = 0
+
+        let content = UNMutableNotificationContent()
+        content.title = card.bank + " 年费提醒"
+        content.body = "\(f.month) 月 \(f.day) 日将扣年费 " + Fmt.money(f.amount)
+            + "，免年费规则：" + f.ruleText
+        content.sound = .default
+
+        let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: false)
+        let request = UNNotificationRequest(identifier: "fee-" + card.id.uuidString,
                                            content: content,
                                            trigger: trigger)
         center.add(request)

@@ -158,6 +158,40 @@ struct Activity: Identifiable, Codable, Hashable {
     }
 }
 
+// MARK: - 年费
+
+struct CardFee: Codable, Hashable {
+    /// 年费金额（0 表示免年费卡）
+    var amount: Double = 0
+    /// 免年费规则：一年内刷满多少笔（0 表示不按笔数）
+    var waiveCount: Int = 0
+    /// 免年费规则：一年内刷满多少金额（0 表示不按金额）
+    var waiveAmount: Double = 0
+    /// 年费扣取月份 / 日期
+    var month: Int = 12
+    var day: Int = 1
+    /// 到期提醒
+    var remind: Bool = true
+    var remindDays: Int = 30
+    /// 达标进度是否手动填写（否则按本期账单自动估算）
+    var manualMode: Bool = false
+    var manualCount: Int = 0
+    var manualAmount: Double = 0
+
+    var isFreeCard: Bool { amount <= 0 }
+    /// 是否配置了免年费规则
+    var hasRule: Bool { waiveCount > 0 || waiveAmount > 0 }
+
+    /// 规则说明，如「刷 6 笔 或 刷满 ¥20,000」
+    var ruleText: String {
+        var parts: [String] = []
+        if waiveCount > 0 { parts.append("刷 \(waiveCount) 笔") }
+        if waiveAmount > 0 { parts.append("刷满 " + Fmt.yuan(waiveAmount)) }
+        if parts.isEmpty { return "无免年费规则" }
+        return parts.joined(separator: " 或 ")
+    }
+}
+
 // MARK: - 信用卡
 
 struct CreditCard: Identifiable, Codable, Hashable {
@@ -184,6 +218,15 @@ struct CreditCard: Identifiable, Codable, Hashable {
     var owner: String? = nil
     /// 附属卡：指向主卡 id。为 nil 表示这是主卡；非 nil 时额度与主卡共享，且不单独计入总授信
     var supplementaryTo: UUID? = nil
+    /// 年费与免年费规则（可选，旧数据为 nil 视为无年费）
+    var fee: CardFee? = nil
+    /// 账单日前一天提醒（可选，旧数据默认开启）
+    var billRemindBefore: Bool? = nil
+
+    /// 年费信息（未设置时返回默认值）
+    var feeInfo: CardFee { fee ?? CardFee() }
+    /// 账单日前一天是否提醒（默认开启）
+    var billRemindBeforeOn: Bool { billRemindBefore ?? true }
 
     /// 是否附属卡
     var isSupplementary: Bool { supplementaryTo != nil }
@@ -216,6 +259,17 @@ struct CreditCard: Identifiable, Codable, Hashable {
     }
 }
 
+// MARK: - 收益记录
+
+/// 一笔活动到账记录（一个活动可以多次到账，用于逐笔查看）
+struct Earning: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var activityID: UUID
+    var amount: Double
+    var date: Date
+    var note: String = ""
+}
+
 // MARK: - 设置
 
 struct AppSettings: Codable {
@@ -233,6 +287,8 @@ final class Store: ObservableObject {
     @Published var settings = AppSettings()
     /// 自定义归属人类别（如 本人 / 父亲），侧滑栏据此筛选卡片
     @Published var owners: [String] = ["本人"]
+    /// 活动收益的每一笔到账记录
+    @Published var earnings: [Earning] = []
 
     private let storageKey = "cardkeeper.state.v1"
 
@@ -242,6 +298,7 @@ final class Store: ObservableObject {
         var settings: AppSettings
         /// 可选：旧版本数据没有这个字段，解码为 nil
         var owners: [String]? = nil
+        var earnings: [Earning]? = nil
     }
 
     init() {
@@ -260,16 +317,19 @@ final class Store: ObservableObject {
         cards = snap.cards
         activities = snap.activities
         settings = snap.settings
+        earnings = snap.earnings ?? []
         if let saved = snap.owners, !saved.isEmpty {
             owners = saved
         }
         normalizeOwners()
         normalizeSupplementary()
+        migrateEarnings()
         return true
     }
 
     func save() {
-        let snap = Snapshot(cards: cards, activities: activities, settings: settings, owners: owners)
+        let snap = Snapshot(cards: cards, activities: activities, settings: settings,
+                            owners: owners, earnings: earnings)
         guard let data = try? JSONEncoder().encode(snap) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
     }
@@ -557,10 +617,117 @@ final class Store: ObservableObject {
         save()
     }
 
+    /// 直接把「已到账」改成一个总数：清空逐笔记录，按新总额补一条，保证两边一致
     func setEarned(activityID: UUID, earned: Double) {
-        guard let i = activities.firstIndex(where: { $0.id == activityID }) else { return }
-        activities[i].earned = max(0, earned)
+        guard activities.contains(where: { $0.id == activityID }) else { return }
+        earnings.removeAll { $0.activityID == activityID }
+        let v = max(0, earned)
+        if v > 0 {
+            earnings.append(Earning(activityID: activityID, amount: v, date: Date(), note: "手动补录"))
+        }
+        syncEarned()
         save()
+    }
+
+    // MARK: 收益明细（逐笔）
+
+    /// 某个活动的到账记录，按时间倒序
+    func earnings(for activityID: UUID) -> [Earning] {
+        earnings.filter { $0.activityID == activityID }
+            .sorted { $0.date > $1.date }
+    }
+
+    /// 某个活动的累计到账
+    func earnedTotal(for activityID: UUID) -> Double {
+        earnings.filter { $0.activityID == activityID }.reduce(0) { $0 + $1.amount }
+    }
+
+    /// 全部到账记录，按时间倒序
+    var allEarnings: [Earning] {
+        earnings.sorted { $0.date > $1.date }
+    }
+
+    func addEarning(activityID: UUID, amount: Double, date: Date = Date(), note: String = "") {
+        guard amount > 0 else { return }
+        earnings.append(Earning(activityID: activityID, amount: amount, date: date, note: note))
+        syncEarned()
+        save()
+    }
+
+    func deleteEarning(_ id: UUID) {
+        earnings.removeAll { $0.id == id }
+        syncEarned()
+        save()
+    }
+
+    /// 把每个活动的 earned 与他名下逐笔记录之和对齐
+    private func syncEarned() {
+        for i in activities.indices {
+            let sum = earnings.filter { $0.activityID == activities[i].id }
+                .reduce(0) { $0 + $1.amount }
+            activities[i].earned = sum
+        }
+    }
+
+    /// 旧数据只有 earned 总数、没有逐笔记录：补一条「历史到账」
+    private func migrateEarnings() {
+        for act in activities where act.earned > 0 {
+            let sum = earnings.filter { $0.activityID == act.id }.reduce(0) { $0 + $1.amount }
+            if sum <= 0.001 {
+                earnings.append(Earning(activityID: act.id, amount: act.earned,
+                                        date: Date(), note: "历史到账"))
+            }
+        }
+        syncEarned()
+    }
+
+    // MARK: 年费
+
+    /// 免年费达标进度（笔数）
+    func feeCount(for card: CreditCard) -> Int {
+        let f = card.feeInfo
+        return f.manualMode ? f.manualCount : card.items.count
+    }
+
+    /// 免年费达标进度（金额）
+    func feeSpent(for card: CreditCard) -> Double {
+        let f = card.feeInfo
+        return f.manualMode ? f.manualAmount : card.billTotal
+    }
+
+    /// 是否已满足免年费条件（任一规则满足即可）
+    func feeWaived(_ card: CreditCard) -> Bool {
+        let f = card.feeInfo
+        if f.amount <= 0 { return true }
+        let countOK = f.waiveCount > 0 && feeCount(for: card) >= f.waiveCount
+        let amountOK = f.waiveAmount > 0 && feeSpent(for: card) >= f.waiveAmount
+        return countOK || amountOK
+    }
+
+    /// 达标描述，如「已刷 3/6 笔」
+    func feeProgressText(_ card: CreditCard) -> String {
+        let f = card.feeInfo
+        if f.amount <= 0 { return "免年费卡" }
+        var parts: [String] = []
+        if f.waiveCount > 0 {
+            parts.append("已刷 \(feeCount(for: card))/\(f.waiveCount) 笔")
+        }
+        if f.waiveAmount > 0 {
+            parts.append("已刷 " + Fmt.yuan(feeSpent(for: card)) + "/" + Fmt.yuan(f.waiveAmount))
+        }
+        if parts.isEmpty { return "无免年费规则" }
+        return parts.joined(separator: " · ")
+    }
+
+    /// 下一次年费扣取日
+    func nextFeeDate(for card: CreditCard) -> Date {
+        let f = card.feeInfo
+        return DateHelp.nextAnnual(month: f.month, day: f.day)
+    }
+
+    /// 距离下次扣年费还有多少天
+    func feeDaysLeft(for card: CreditCard) -> Int {
+        DateHelp.daysUntil(nextFeeDate(for: card))
     }
 
     func categoryTotals() -> [(name: String, value: Double, color: String)] {
@@ -637,12 +804,15 @@ final class Store: ObservableObject {
 
     func deleteActivity(_ id: UUID) {
         activities.removeAll { $0.id == id }
+        earnings.removeAll { $0.activityID == id }
         save()
     }
 
     func deleteCard(_ id: UUID) {
+        let actIDs = Set(activities.filter { $0.cardID == id }.map { $0.id })
         cards.removeAll { $0.id == id }
         activities.removeAll { $0.cardID == id }
+        earnings.removeAll { actIDs.contains($0.activityID) }
         // 主卡被删后，其附属卡自动转为独立卡，避免留下指向空 id 的孤儿
         for i in cards.indices where cards[i].supplementaryTo == id {
             cards[i].supplementaryTo = nil
@@ -666,7 +836,9 @@ final class Store: ObservableObject {
                 Transaction(merchant: "Apple Music", category: "订阅", amount: 68.00, date: DateHelp.thisMonth(day: 8)),
                 Transaction(merchant: "地铁出行", category: "交通", amount: 24.00, date: DateHelp.thisMonth(day: 7)),
                 Transaction(merchant: "优衣库 三里屯", category: "购物", amount: 329.90, date: DateHelp.thisMonth(day: 5))
-            ])
+            ],
+            fee: CardFee(amount: 3600, waiveCount: 6, month: 12, day: 1,
+                         remind: true, remindDays: 30))
 
         let c2 = CreditCard(
             bank: "交通银行", name: "太平洋信用卡", org: "Mastercard", last4: "7719",
@@ -677,7 +849,9 @@ final class Store: ObservableObject {
                 Transaction(merchant: "瑞幸咖啡", category: "餐饮", amount: 32.00, date: DateHelp.thisMonth(day: 13)),
                 Transaction(merchant: "滴滴出行", category: "交通", amount: 28.50, date: DateHelp.thisMonth(day: 10)),
                 Transaction(merchant: "中石化 · 望京站", category: "加油", amount: 300.00, date: DateHelp.thisMonth(day: 6))
-            ])
+            ],
+            fee: CardFee(amount: 500, waiveCount: 6, waiveAmount: 0, month: 3, day: 15,
+                         remind: true, remindDays: 30))
 
         let c3 = CreditCard(
             bank: "中信银行", name: "魔力白金卡", org: "银联", last4: "2065",
@@ -687,7 +861,9 @@ final class Store: ObservableObject {
                 Transaction(merchant: "美团买菜", category: "超市", amount: 156.80, date: DateHelp.thisMonth(day: 16)),
                 Transaction(merchant: "中石油 · 亦庄站", category: "加油", amount: 300.00, date: DateHelp.thisMonth(day: 12)),
                 Transaction(merchant: "万达影城", category: "娱乐", amount: 88.00, date: DateHelp.thisMonth(day: 8))
-            ])
+            ],
+            fee: CardFee(amount: 480, waiveCount: 0, waiveAmount: 30000, month: 9, day: 10,
+                         remind: true, remindDays: 15))
 
         let c4 = CreditCard(
             bank: "浦发银行", name: "AE 白金卡", org: "AE", last4: "9014",
@@ -695,7 +871,9 @@ final class Store: ObservableObject {
             colorA: "20242B", colorB: "3F4650", remind: false, remindDays: 7,
             items: [
                 Transaction(merchant: "日上免税行", category: "购物", amount: 682.00, date: DateHelp.thisMonth(day: 4))
-            ])
+            ],
+            fee: CardFee(amount: 3600, waiveCount: 12, waiveAmount: 300000, month: 6, day: 1,
+                         remind: true, remindDays: 30))
 
         // 招行附属卡：额度与主卡共享，不单独计入总授信
         let c5 = CreditCard(
@@ -740,12 +918,14 @@ final class Store: ObservableObject {
                      steps: [ActivityStep(label: "完成一笔满 200 元消费", done: false)])
         ]
 
+        migrateEarnings()
         save()
     }
 
     func reset() {
         cards = []
         activities = []
+        earnings = []
         settings = AppSettings()
         seed()
     }
@@ -782,6 +962,20 @@ enum DateHelp {
 
     static func daysToDue(_ day: Int) -> Int {
         daysUntil(nextOccurrence(day: day))
+    }
+
+    /// 下一次「每年某月某日」，用于年费扣取日
+    static func nextAnnual(month: Int, day: Int) -> Date {
+        let today = cal.startOfDay(for: Date())
+        var c = cal.dateComponents([.year], from: today)
+        c.month = min(max(month, 1), 12)
+        c.day = min(max(day, 1), 28)
+        c.hour = 9
+        var d = cal.date(from: c) ?? today
+        if d < today {
+            d = cal.date(byAdding: .year, value: 1, to: d) ?? d
+        }
+        return d
     }
 
     static func daysToDeadline(_ date: Date) -> Int {
