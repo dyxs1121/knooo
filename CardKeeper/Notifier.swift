@@ -81,6 +81,13 @@ final class Notifier {
             dc.hour = 9
             comps = dc
             repeats = false
+        case .precise:
+            // 抢购准时提醒：按用户指定的日期时间，可提前 N 分钟
+            guard let at = act.alertAt else { return }
+            let fire = at.addingTimeInterval(TimeInterval(-act.leadMinutes * 60))
+            guard fire > Date() else { return }
+            comps = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: fire)
+            repeats = false
         case .none:
             return
         }
@@ -88,8 +95,9 @@ final class Notifier {
         let cardName = cards.first(where: { $0.id == act.cardID }).map { $0.short + " ••" + $0.last4 } ?? "信用卡"
 
         let content = UNMutableNotificationContent()
-        content.title = "活动提醒 · " + cardName
+        content.title = (act.remind == .precise ? "抢购提醒 · " : "活动提醒 · ") + cardName
         content.body = act.title + " · " + act.remainText
+            + (act.reward > 0 ? " · 预期收益 " + Fmt.money(act.reward) : "")
         content.sound = .default
 
         let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: repeats)

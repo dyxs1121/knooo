@@ -263,6 +263,8 @@ extension CardTheme {
 struct CardFace: View {
     var card: CreditCard
     var height: CGFloat = 180
+    /// 附属卡时传入主卡标签（如「附属 · 招商 ••4832」），主卡传 nil
+    var supplementaryLabel: String? = nil
 
     /// 背景：有自定义照片用照片（加暗化保证文字可读），否则用主题渐变
     private var backgroundLayer: AnyView {
@@ -329,9 +331,22 @@ struct CardFace: View {
 
             Spacer()
 
-            Text(card.org)
-                .font(.system(size: 10.5, weight: .bold))
-                .foregroundColor(.white.opacity(0.75))
+            VStack(alignment: .trailing, spacing: 3) {
+                Text(card.org)
+                    .font(.system(size: 10.5, weight: .bold))
+                    .foregroundColor(.white.opacity(0.75))
+
+                if let label = supplementaryLabel {
+                    Text(label)
+                        .font(.system(size: 8.5, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.92))
+                        .lineLimit(1)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.white.opacity(0.18))
+                        .clipShape(Capsule())
+                }
+            }
         }
     }
 

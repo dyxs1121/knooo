@@ -37,6 +37,10 @@ struct ActivitiesView: View {
                         .padding(.horizontal, 20)
                         .padding(.top, 16)
 
+                    earnStrip
+                        .padding(.horizontal, 20)
+                        .padding(.top, 10)
+
                     segmented
                         .padding(.horizontal, 20)
                         .padding(.top, 20)
@@ -140,8 +144,34 @@ struct ActivitiesView: View {
         }
     }
 
-    private var nearestHint: String {
-        let pending = store.activities.filter { !$0.isDone }
+    /// 活动收益总览
+    private var earnStrip: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "yensign.circle.fill")
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(Palette.orange)
+
+            Text("活动收益")
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundColor(Palette.text)
+
+            Spacer()
+
+            Text("已到账 " + Fmt.yuan(store.totalEarned))
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundColor(Palette.green)
+
+            Text("预期 " + Fmt.yuan(store.totalReward))
+                .font(.system(size: 11.5))
+                .foregroundColor(Palette.sub)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .background(Palette.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private var nearestHint: String {        let pending = store.activities.filter { !$0.isDone }
         guard let first = pending.min(by: { $0.deadline < $1.deadline }) else {
             return "暂无待办"
         }
@@ -191,9 +221,13 @@ struct ActivitiesView: View {
         }
     }
 
+    private var groups: [Store.ActivityGroup] {
+        store.activityGroups(filtered)
+    }
+
     private var list: some View {
-        VStack(spacing: 11) {
-            if filtered.isEmpty {
+        VStack(spacing: 18) {
+            if groups.isEmpty {
                 VStack(spacing: 6) {
                     Text("这里还没有活动")
                         .font(.system(size: 13))
@@ -205,20 +239,67 @@ struct ActivitiesView: View {
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 46)
             } else {
-                ForEach(filtered) { act in
-                    activityCard(act)
+                ForEach(groups) { g in
+                    VStack(alignment: .leading, spacing: 8) {
+                        groupHeader(g)
+                        VStack(spacing: 8) {
+                            ForEach(g.acts) { act in
+                                activityCard(act)
+                            }
+                        }
+                        .padding(.leading, 12)
+                    }
                 }
             }
         }
     }
 
+    /// 同一张卡的活动归为一组，组头显示该卡与收益合计
+    private func groupHeader(_ g: Store.ActivityGroup) -> some View {
+        HStack(spacing: 10) {
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(LinearGradient(colors: [Palette.purple, Color(hex: "6E8BFF")],
+                                     startPoint: .topLeading, endPoint: .bottomTrailing))
+                .frame(width: 34, height: 34)
+                .overlay(
+                    Image(systemName: "creditcard.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
+                )
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(g.card.map { $0.bank + " ••" + $0.last4 } ?? "未关联卡片")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(Palette.text)
+                    .lineLimit(1)
+                Text(groupSubtitle(g))
+                    .font(.system(size: 11))
+                    .foregroundColor(Palette.sub)
+                    .lineLimit(1)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private func groupSubtitle(_ g: Store.ActivityGroup) -> String {
+        var parts = ["\(g.acts.count) 个活动"]
+        if g.reward > 0 { parts.append("预期 " + Fmt.yuan(g.reward)) }
+        parts.append("已到账 " + Fmt.yuan(g.earned))
+        return parts.joined(separator: " · ")
+    }
+
     private func activityCard(_ act: Activity) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                PillView(text: store.cardName(act.cardID), fg: Color(hex: "5A48E0"), bg: Palette.purple.opacity(0.10))
                 PillView(text: act.kind.shortLabel, fg: Palette.blue, bg: Palette.blue.opacity(0.09))
                 if act.isDone {
                     PillView(text: "已完成", fg: Palette.green, bg: Palette.green.opacity(0.12))
+                }
+                if act.reward > 0 {
+                    PillView(text: "收益 " + Fmt.yuan(act.earned) + "/" + Fmt.yuan(act.reward),
+                             fg: Palette.orange, bg: Palette.orange.opacity(0.12))
                 }
                 Spacer()
             }
@@ -256,9 +337,10 @@ struct ActivitiesView: View {
                     .font(.system(size: 10, weight: .medium))
                     .foregroundColor(Palette.sub)
 
-                Text(act.remind.rawValue + " · 剩 \(max(0, DateHelp.daysToDeadline(act.deadline))) 天")
+                Text(act.remindText + " · 剩 \(max(0, DateHelp.daysToDeadline(act.deadline))) 天")
                     .font(.system(size: 11))
                     .foregroundColor(daysColor(act))
+                    .lineLimit(1)
 
                 Spacer()
 
@@ -329,6 +411,8 @@ struct ActivityDetailView: View {
 
     @State private var amountText = ""
     @State private var confirmDelete = false
+    @State private var rewardText = ""
+    @State private var earnedText = ""
 
     private var activity: Activity? {
         store.activities.first { $0.id == activityID }
@@ -355,6 +439,9 @@ struct ActivityDetailView: View {
 
                             progressPanel(act)
                                 .padding(.top, 16)
+
+                            rewardPanel(act)
+                                .padding(.top, 12)
 
                             if act.kind == .amount {
                                 amountInput(act)
@@ -395,6 +482,7 @@ struct ActivityDetailView: View {
                 }
                 Button("取消", role: .cancel) { }
             }
+            .onAppear { syncRewardFields() }
         }
         .navigationViewStyle(StackNavigationViewStyle())
     }
@@ -409,6 +497,95 @@ struct ActivityDetailView: View {
             Spacer()
         }
         .padding(.top, 8)
+    }
+
+    // MARK: 收益记录
+
+    private func syncRewardFields() {
+        guard let act = activity else { return }
+        rewardText = act.reward > 0 ? numText(act.reward) : ""
+        earnedText = act.earned > 0 ? numText(act.earned) : ""
+    }
+
+    private func numText(_ v: Double) -> String {
+        v == v.rounded() ? String(format: "%.0f", v) : String(format: "%.2f", v)
+    }
+
+    private func rewardPanel(_ act: Activity) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("活动收益")
+                    .font(.system(size: 12))
+                    .foregroundColor(Palette.sub)
+                Spacer()
+                Text(act.earned > 0 ? "已到账 " + Fmt.yuan(act.earned) : "尚未到账")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundColor(act.earned > 0 ? Palette.green : Palette.sub)
+            }
+
+            HStack(spacing: 10) {
+                rewardField(title: "预期奖励", text: $rewardText)
+                rewardField(title: "已到账", text: $earnedText)
+            }
+            .padding(.top, 11)
+
+            HStack(spacing: 8) {
+                Button {
+                    store.setEarned(activityID: activityID, earned: act.reward)
+                    syncRewardFields()
+                } label: {
+                    Text("按预期全部到账")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Palette.blue)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Palette.blue.opacity(0.09))
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                Button {
+                    store.setReward(activityID: activityID, reward: Double(rewardText) ?? 0)
+                    store.setEarned(activityID: activityID, earned: Double(earnedText) ?? 0)
+                    syncRewardFields()
+                } label: {
+                    Text("保存收益")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Palette.primaryButton)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 11)
+        }
+        .padding(16)
+        .background(Palette.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private func rewardField(title: String, text: Binding<String>) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 10.5))
+                .foregroundColor(Palette.sub)
+            HStack(spacing: 3) {
+                Text("¥")
+                    .font(.system(size: 12))
+                    .foregroundColor(Palette.sub)
+                TextField("0", text: text)
+                    .keyboardType(.decimalPad)
+                    .font(.system(size: 14, weight: .semibold))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color(hex: "767680").opacity(0.08))
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
     }
 
     private func progressPanel(_ act: Activity) -> some View {
@@ -434,7 +611,7 @@ struct ActivityDetailView: View {
                     Image(systemName: "bell")
                         .font(.system(size: 10))
                         .foregroundColor(Palette.sub)
-                    Text(act.remind.rawValue)
+                    Text(act.remindText)
                         .font(.system(size: 11))
                         .foregroundColor(Palette.sub)
                 }
@@ -593,30 +770,38 @@ struct ActivityDetailView: View {
     }
 }
 
-// MARK: - 添加活动
+// MARK: - 添加活动（同一张卡可一次添加多个活动）
 
 struct ActivityEditorView: View {
     @EnvironmentObject var store: Store
     @Environment(\.dismiss) var dismiss
 
-    @State private var title = ""
-    @State private var detail = ""
+    struct Draft: Identifiable {
+        var id = UUID()
+        var title = ""
+        var detail = ""
+        var kind: ActivityKind = .count
+        var targetText = "3"
+        var rewardText = ""
+    }
+
+    @State private var drafts: [Draft] = [Draft()]
     @State private var cardID: UUID?
-    @State private var kind: ActivityKind = .count
-    @State private var targetText = "3"
     @State private var deadline = Date().addingTimeInterval(86400 * 14)
     @State private var remind: RemindRule = .weeklySunday
+    @State private var alertAt = Date().addingTimeInterval(86400 * 2)
+    @State private var leadMinutes = 10
     @State private var showError = false
-    /// Picker 的 selection 必须是稳定值：不能每次求值都生成新 UUID，否则 Picker 找不到匹配项
+    /// Picker 的 selection 必须是稳定值
     @State private var fallbackCardID = UUID()
+
+    private let leadOptions = [0, 5, 10, 30, 60]
 
     var body: some View {
         NavigationView {
             Form {
-                Section("活动信息") {
-                    TextField("活动名称，如 周五满 100 减 50", text: $title)
-                    TextField("规则 / 名额 / 注意事项", text: $detail)
-                    Picker("关联卡片", selection: Binding(
+                Section("关联卡片") {
+                    Picker("卡片", selection: Binding(
                         get: { cardID ?? store.cards.first?.id ?? fallbackCardID },
                         set: { cardID = $0 }
                     )) {
@@ -626,45 +811,97 @@ struct ActivityEditorView: View {
                     }
                 }
 
-                Section("目标") {
-                    Picker("目标类型", selection: $kind) {
-                        ForEach(ActivityKind.allCases) { k in
-                            Text(k.label).tag(k)
+                ForEach(drafts.indices, id: \.self) { i in
+                    Section {
+                        TextField("活动名称，如 周五满 100 减 50", text: $drafts[i].title)
+                        TextField("规则 / 名额 / 注意事项", text: $drafts[i].detail)
+
+                        Picker("目标类型", selection: $drafts[i].kind) {
+                            ForEach(ActivityKind.allCases) { k in
+                                Text(k.label).tag(k)
+                            }
                         }
-                    }
-                    .pickerStyle(.segmented)
+                        .pickerStyle(.segmented)
 
-                    HStack {
-                        Text(kind == .amount ? "目标金额" : "目标次数")
-                        Spacer()
-                        TextField("0", text: $targetText)
-                            .keyboardType(.decimalPad)
-                            .multilineTextAlignment(.trailing)
-                            .frame(width: 90)
-                    }
+                        HStack {
+                            Text(drafts[i].kind == .amount ? "目标金额" : "目标次数")
+                            Spacer()
+                            TextField("0", text: $drafts[i].targetText)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 90)
+                        }
 
-                    DatePicker("截止日期", selection: $deadline, displayedComponents: .date)
+                        HStack {
+                            Text("预期收益")
+                            Spacer()
+                            Text("¥")
+                                .foregroundColor(Palette.sub)
+                            TextField("0", text: $drafts[i].rewardText)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 90)
+                        }
+
+                        if drafts.count > 1 {
+                            Button(role: .destructive) {
+                                drafts.remove(at: i)
+                            } label: {
+                                Text("删除这条活动")
+                                    .font(.system(size: 14))
+                            }
+                        }
+                    } header: {
+                        Text("活动 \(i + 1)")
+                    }
                 }
 
-                Section("提醒") {
+                Section {
+                    Button {
+                        drafts.append(Draft())
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: "plus.circle.fill")
+                            Text("再加一条活动（同一张卡）")
+                        }
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(Palette.blue)
+                    }
+                } footer: {
+                    Text("一次可以为同一张卡添加多个活动，列表里会按卡片归类显示。")
+                        .font(.system(size: 11.5))
+                }
+
+                Section("截止与提醒") {
+                    DatePicker("截止日期", selection: $deadline, displayedComponents: .date)
+
                     Picker("提醒方式", selection: $remind) {
                         ForEach(RemindRule.allCases) { r in
                             Text(r.rawValue).tag(r)
                         }
                     }
-                }
 
-                Section {
-                    Text("按次数会自动生成可逐个打卡的清单；按金额每次记录消费累加；单次可一键确认完成。")
-                        .font(.system(size: 12))
-                        .foregroundColor(Palette.sub)
+                    if remind == .precise {
+                        DatePicker("提醒时间", selection: $alertAt,
+                                   displayedComponents: [.date, .hourAndMinute])
+
+                        Picker("提前量", selection: $leadMinutes) {
+                            ForEach(leadOptions, id: \.self) { m in
+                                Text(m == 0 ? "准时提醒" : "提前 \(m) 分钟").tag(m)
+                            }
+                        }
+
+                        Text("适合抢购、限量名额：到点会推送通知，提醒你立刻去参与。")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(Palette.sub)
+                    }
                 }
 
                 Section {
                     Button {
                         save()
                     } label: {
-                        Text("添加活动")
+                        Text(drafts.count > 1 ? "添加 \(drafts.count) 个活动" : "添加活动")
                             .font(.system(size: 16, weight: .semibold))
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
@@ -683,7 +920,7 @@ struct ActivityEditorView: View {
             .onAppear {
                 if cardID == nil { cardID = store.cards.first?.id }
             }
-            .alert("请填写活动名称和目标值", isPresented: $showError) {
+            .alert("请至少填写一条活动的名称和目标值", isPresented: $showError) {
                 Button("好", role: .cancel) { }
             }
         }
@@ -691,31 +928,47 @@ struct ActivityEditorView: View {
     }
 
     private func save() {
-        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let raw = Double(targetText) ?? 0
-        guard !name.isEmpty, raw > 0, let cid = cardID else {
+        guard let cid = cardID else {
             showError = true
             return
         }
 
-        let target = kind == .amount ? raw : max(1, raw.rounded())
-        var steps: [ActivityStep] = []
-        if kind != .amount {
-            for i in 0..<Int(target) {
-                steps.append(ActivityStep(label: "第 \(i + 1) 次", done: false))
+        var created = 0
+
+        for d in drafts {
+            let name = d.title.trimmingCharacters(in: .whitespacesAndNewlines)
+            let raw = Double(d.targetText) ?? 0
+            guard !name.isEmpty, raw > 0 else { continue }
+
+            let target = d.kind == .amount ? raw : max(1, raw.rounded())
+            var steps: [ActivityStep] = []
+            if d.kind != .amount {
+                for i in 0..<Int(target) {
+                    steps.append(ActivityStep(label: "第 \(i + 1) 次", done: false))
+                }
             }
+
+            var act = Activity(cardID: cid,
+                               title: name,
+                               detail: d.detail.isEmpty ? (d.kind == .amount ? "累计消费达标即完成" : "按次打卡完成") : d.detail,
+                               kind: d.kind,
+                               target: target,
+                               deadline: deadline,
+                               remind: remind,
+                               steps: steps)
+            act.reward = Double(d.rewardText) ?? 0
+            act.alertAt = (remind == .precise) ? alertAt : nil
+            act.leadMinutes = (remind == .precise) ? leadMinutes : 0
+
+            store.activities.append(act)
+            created += 1
         }
 
-        let act = Activity(cardID: cid,
-                           title: name,
-                           detail: detail.isEmpty ? (kind == .amount ? "累计消费达标即完成" : "按次打卡完成") : detail,
-                           kind: kind,
-                           target: target,
-                           deadline: deadline,
-                           remind: remind,
-                           steps: steps)
+        guard created > 0 else {
+            showError = true
+            return
+        }
 
-        store.activities.append(act)
         store.save()
         Notifier.shared.refresh(store: store)
         dismiss()

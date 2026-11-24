@@ -233,25 +233,36 @@ struct StatsView: View {
                         .foregroundColor(Palette.sub)
                 }
 
-                ForEach(Array(store.cards.enumerated()), id: \.offset) { index, card in
+                ForEach(Array(store.bankLimits.enumerated()), id: \.offset) { index, b in
                     HStack(spacing: 10) {
-                        Text(card.short)
+                        Text(b.name.replacingOccurrences(of: "银行", with: ""))
                             .font(.system(size: 12.5, weight: .medium))
                             .foregroundColor(Palette.text)
-                            .frame(width: 44, alignment: .leading)
+                            .frame(width: 48, alignment: .leading)
+                            .lineLimit(1)
 
-                        BarView(value: card.usedRatio, height: 7,
-                                tint: card.usedRatio > 0.7
+                        BarView(value: b.ratio, height: 7,
+                                tint: b.ratio > 0.7
                                 ? LinearGradient(colors: [Color(hex: "FF6B4A"), Palette.red], startPoint: .leading, endPoint: .trailing)
                                 : Palette.accentGradient)
 
-                        Text("\(Int(card.usedRatio * 100))% · " + Fmt.yuan(card.used))
+                        Text("\(Int(b.ratio * 100))% · " + Fmt.yuan(b.used))
                             .font(.system(size: 11))
                             .foregroundColor(Palette.sub)
                             .frame(width: 82, alignment: .trailing)
                             .lineLimit(1)
                     }
                     .padding(.top, index == 0 ? 14 : 11)
+
+                    if b.count > 1 {
+                        Text("\(b.count) 张卡共享 " + Fmt.yuan(b.limit) + "，可用 " + Fmt.yuan(b.available)
+                             + (b.supplementary > 0 ? "（含 \(b.supplementary) 张附属卡）" : ""))
+                            .font(.system(size: 10))
+                            .foregroundColor(Palette.sub.opacity(0.8))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.leading, 58)
+                            .padding(.top, 2)
+                    }
                 }
             }
             .padding(16)

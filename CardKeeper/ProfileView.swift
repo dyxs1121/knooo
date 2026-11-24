@@ -57,6 +57,14 @@ struct ProfileView: View {
 
     // MARK: 头部
 
+    private var supplementaryCount: Int {
+        store.cards.filter { $0.supplementaryTo != nil }.count
+    }
+
+    private var bankGroupCount: Int {
+        Set(store.cards.map { store.bankKey($0.bank) }).count
+    }
+
     private var header: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(Fmt.todayLine())
@@ -87,7 +95,9 @@ struct ProfileView: View {
                     Text("我的卡包")
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundColor(.white)
-                    Text("\(store.cards.count) 张卡 · 总授信 " + Fmt.yuan(store.totalLimit))
+                    Text("\(store.cards.count) 张卡"
+                         + (supplementaryCount > 0 ? "（含 \(supplementaryCount) 张附属）" : "")
+                         + " / \(bankGroupCount) 家银行 · 总授信 " + Fmt.yuan(store.totalLimit))
                         .font(.system(size: 11.5))
                         .foregroundColor(.white.opacity(0.55))
                 }
@@ -102,7 +112,7 @@ struct ProfileView: View {
 
             HStack(spacing: 0) {
                 profileCell("已用额度", Fmt.yuan(store.totalUsed), .white)
-                profileCell("可用额度", Fmt.yuan(store.totalLimit - store.totalUsed), .white)
+                profileCell("可用额度", Fmt.yuan(store.totalAvailable), .white)
                 profileCell("待还", Fmt.yuan(store.totalOutstanding), Color(hex: "FFCF8A"))
             }
             .padding(.top, 13)
@@ -226,9 +236,28 @@ struct ProfileView: View {
                                 )
 
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(card.bank + " ••" + card.last4)
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundColor(Palette.text)
+                                HStack(spacing: 6) {
+                                    Text(card.bank + " ••" + card.last4)
+                                        .font(.system(size: 14, weight: .medium))
+                                        .foregroundColor(Palette.text)
+                                    Text(store.ownerName(of: card))
+                                        .font(.system(size: 9.5, weight: .medium))
+                                        .foregroundColor(Palette.purple)
+                                        .padding(.horizontal, 6)
+                                        .padding(.vertical, 2)
+                                        .background(Palette.purple.opacity(0.10))
+                                        .clipShape(Capsule())
+
+                                    if card.isSupplementary {
+                                        Text("附属卡")
+                                            .font(.system(size: 9.5, weight: .medium))
+                                            .foregroundColor(Palette.orange)
+                                            .padding(.horizontal, 6)
+                                            .padding(.vertical, 2)
+                                            .background(Palette.orange.opacity(0.12))
+                                            .clipShape(Capsule())
+                                    }
+                                }
                                 Text("账单日 \(card.billDay) 日 · 还款日 \(card.dueDay) 日 · " +
                                      (card.remind ? "提前 \(card.remindDays) 天提醒" : "未开启提醒"))
                                     .font(.system(size: 11.5))
@@ -307,23 +336,40 @@ struct CardEditorView: View {
 
     @State private var card: CreditCard
     private let isNew: Bool
+    /// 新增卡片时默认归入的类别（跟随首页当前筛选）
+    private let defaultOwner: String?
 
     @State private var confirmDelete = false
     @State private var showError = false
     /// 卡面图片来源：拍照 / 相册（iOS 15 上同视图只能挂一个 sheet，用枚举统一驱动）
     @State private var pickSource: PickSource?
+    /// 是否设为附属卡（保存时写回 card.supplementaryTo）
+    @State private var isSupplementary = false
+    /// 选中的主卡 id
+    @State private var primaryID: UUID?
 
     private enum PickSource: String, Identifiable {
         case camera, library
         var id: String { rawValue }
     }
 
-    init(card: CreditCard, isNew: Bool = false) {
+    init(card: CreditCard, isNew: Bool = false, defaultOwner: String? = nil) {
         _card = State(initialValue: card)
         self.isNew = isNew
+        self.defaultOwner = defaultOwner
     }
 
     private var organizations: [String] { ["银联", "VISA", "Mastercard", "AE", "JCB"] }
+
+    /// 可作为主卡的卡片（排除自身与已是附属卡的卡，避免链式附属）
+    private var primaryCandidates: [CreditCard] {
+        store.primaryCandidates(excluding: card.id)
+    }
+
+    private var selectedPrimary: CreditCard? {
+        guard let pid = primaryID else { return primaryCandidates.first }
+        return store.card(pid) ?? primaryCandidates.first
+    }
 
     private var cameraAvailable: Bool {
         UIImagePickerController.isSourceTypeAvailable(.camera)
@@ -403,14 +449,91 @@ struct CardEditorView: View {
                     }
                 }
 
+                Section("归属与分类") {
+                    Picker("归属人", selection: Binding(
+                        get: { card.owner ?? store.owners.first ?? "本人" },
+                        set: { card.owner = $0 }
+                    )) {
+                        ForEach(store.owners, id: \.self) { o in
+                            Text(o).tag(o)
+                        }
+                    }
+                }
+
+                Section {
+                    Toggle("这是附属卡", isOn: Binding(
+                        get: { isSupplementary },
+                        set: { on in
+                            isSupplementary = on
+                            if on {
+                                if primaryID == nil { primaryID = primaryCandidates.first?.id }
+                                // 银行还没填时，自动带出主卡的银行，避免附属卡被算进另一家
+                                if card.bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                                   let p = store.card(primaryID ?? primaryCandidates.first?.id ?? card.id) {
+                                    card.bank = p.bank
+                                }
+                            } else {
+                                primaryID = nil
+                            }
+                        }
+                    ))
+                    .tint(Palette.green)
+
+                    if isSupplementary {
+                        if primaryCandidates.isEmpty {
+                            Text("还没有可选的主卡。请先添加一张主卡，再回来把它设为附属卡。")
+                                .font(.system(size: 12.5))
+                                .foregroundColor(Palette.sub)
+                                .fixedSize(horizontal: false, vertical: true)
+                        } else {
+                            Picker("主卡", selection: Binding(
+                                get: { primaryID ?? primaryCandidates.first?.id ?? card.id },
+                                set: { primaryID = $0 }
+                            )) {
+                                ForEach(primaryCandidates) { p in
+                                    Text(p.bank + " ••" + p.last4 + " · " + Fmt.yuan(p.limit)).tag(p.id)
+                                }
+                            }
+
+                            if let p = selectedPrimary {
+                                Text("额度与主卡共享：本卡不单独计入总授信，消费和账单会占用「\(p.short) ••\(p.last4)」所在额度组的额度（同组共用 " + Fmt.yuan(store.groupLimit(store.limitGroupKey(p))) + "）。")
+                                    .font(.system(size: 12))
+                                    .foregroundColor(Palette.sub)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                } header: {
+                    Text("附属卡")
+                } footer: {
+                    Text("附属卡与主卡共用一条信用额度：总授信只按主卡计算一次，主卡和附属卡的已用会合并占用同一条额度。")
+                        .font(.system(size: 11.5))
+                }
+
                 Section("额度") {
-                    HStack {
-                        Text("信用额度")
-                        Spacer()
-                        TextField("30000", value: $card.limit, format: .number)
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
-                            .frame(width: 120)
+                    if isSupplementary, let p = selectedPrimary {
+                        // 附属卡额度由主卡决定，不单独填写
+                        HStack {
+                            Text("信用额度")
+                            Spacer()
+                            Text("与主卡共享")
+                                .foregroundColor(Palette.sub)
+                        }
+                        HStack {
+                            Text("共享额度")
+                            Spacer()
+                            Text(Fmt.yuan(store.groupLimit(store.limitGroupKey(p))))
+                                .font(.system(size: 15, weight: .semibold))
+                        }
+                    } else {
+                        HStack {
+                            Text("信用额度")
+                            Spacer()
+                            TextField("30000", value: $card.limit, format: .number)
+                                .keyboardType(.numberPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 120)
+                        }
                     }
                     HStack {
                         Text("已用额度")
@@ -427,6 +550,13 @@ struct CardEditorView: View {
                             .keyboardType(.decimalPad)
                             .multilineTextAlignment(.trailing)
                             .frame(width: 120)
+                    }
+                    if !isSupplementary, !card.bank.isEmpty,
+                       store.cards.filter({ store.bankKey($0.bank) == store.bankKey(card.bank) && $0.id != card.id }).count > 0 {
+                        Text("⚠️ 「\(card.bank)」还有 \(store.cards.filter { store.bankKey($0.bank) == store.bankKey(card.bank) && $0.id != card.id }.count) 张卡：同银行多卡共享额度，总授信按各行最高额度计算，不做叠加。")
+                            .font(.system(size: 12))
+                            .foregroundColor(Palette.sub)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
@@ -477,6 +607,20 @@ struct CardEditorView: View {
                 if !newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                     showError = false
                 }
+            }
+            .onAppear {
+                if card.owner == nil || card.owner!.isEmpty {
+                    card.owner = defaultOwner ?? store.owners.first ?? "本人"
+                }
+                isSupplementary = card.supplementaryTo != nil
+                if primaryID == nil { primaryID = card.supplementaryTo }
+            }
+            .onChange(of: primaryID) { newValue in
+                // 换主卡时，若银行还是空的，跟着主卡走
+                guard isSupplementary,
+                      card.bank.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                      let pid = newValue, let p = store.card(pid) else { return }
+                card.bank = p.bank
             }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -599,6 +743,18 @@ struct CardEditorView: View {
         }
         if card.limit < 1 {
             card.limit = 1
+        }
+
+        // 附属卡关系：勾选了就必须落到一张真实主卡上，否则视为独立卡
+        if isSupplementary, let pid = primaryID ?? primaryCandidates.first?.id {
+            card.supplementaryTo = pid
+            // 附属卡不自带额度，同步一份主卡组的共享额度便于展示
+            if let p = store.card(pid) {
+                let shared = store.groupLimit(store.limitGroupKey(p))
+                if shared > 0 { card.limit = shared }
+            }
+        } else {
+            card.supplementaryTo = nil
         }
 
         if let index = store.cards.firstIndex(where: { $0.id == card.id }) {

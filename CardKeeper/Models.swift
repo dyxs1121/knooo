@@ -42,6 +42,7 @@ enum RemindRule: String, Codable, CaseIterable, Identifiable {
     case monthlyFirst = "每月 1 日 09:00"
     case daily = "每天 09:00"
     case dayBefore = "截止前 1 天 09:00"
+    case precise = "指定时间（抢购）"
     case none = "不提醒"
 
     var id: String { rawValue }
@@ -64,8 +65,75 @@ struct Activity: Identifiable, Codable, Hashable {
     var deadline: Date
     var remind: RemindRule = .weeklySunday
     var steps: [ActivityStep] = []
+    /// 预期收益（银行/平台承诺的奖励金额）
+    var reward: Double = 0
+    /// 已到账收益（实际收到的金额）
+    var earned: Double = 0
+    /// 指定时间提醒（抢购场景），配合 remind == .precise 使用
+    var alertAt: Date? = nil
+    /// 抢购提醒提前分钟数
+    var leadMinutes: Int = 0
+
+    // MARK: 兼容旧数据
+
+    private enum CodingKeys: String, CodingKey {
+        case id, cardID, title, detail, kind, target, current, deadline, remind, steps
+        case reward, earned, alertAt, leadMinutes
+    }
+
+    init(cardID: UUID, title: String, detail: String, kind: ActivityKind, target: Double,
+         current: Double = 0, deadline: Date, remind: RemindRule = .weeklySunday,
+         steps: [ActivityStep] = [], reward: Double = 0, earned: Double = 0,
+         alertAt: Date? = nil, leadMinutes: Int = 0) {
+        self.cardID = cardID
+        self.title = title
+        self.detail = detail
+        self.kind = kind
+        self.target = target
+        self.current = current
+        self.deadline = deadline
+        self.remind = remind
+        self.steps = steps
+        self.reward = reward
+        self.earned = earned
+        self.alertAt = alertAt
+        self.leadMinutes = leadMinutes
+    }
+
+    /// 旧版本保存的活动没有 reward / earned / alertAt 等字段，这里逐项容错，避免整份数据解码失败
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        cardID = try c.decode(UUID.self, forKey: .cardID)
+        title = try c.decode(String.self, forKey: .title)
+        detail = try c.decodeIfPresent(String.self, forKey: .detail) ?? ""
+        kind = try c.decode(ActivityKind.self, forKey: .kind)
+        target = try c.decode(Double.self, forKey: .target)
+        current = try c.decodeIfPresent(Double.self, forKey: .current) ?? 0
+        deadline = try c.decode(Date.self, forKey: .deadline)
+        remind = try c.decodeIfPresent(RemindRule.self, forKey: .remind) ?? .weeklySunday
+        steps = try c.decodeIfPresent([ActivityStep].self, forKey: .steps) ?? []
+        reward = try c.decodeIfPresent(Double.self, forKey: .reward) ?? 0
+        earned = try c.decodeIfPresent(Double.self, forKey: .earned) ?? 0
+        alertAt = try c.decodeIfPresent(Date.self, forKey: .alertAt)
+        leadMinutes = try c.decodeIfPresent(Int.self, forKey: .leadMinutes) ?? 0
+    }
 
     var doneCount: Int { steps.filter { $0.done }.count }
+
+    /// 提醒文案（指定时间时显示到分钟）
+    var remindText: String {
+        if remind == .precise, let at = alertAt {
+            let f = DateFormatter()
+            f.locale = Locale(identifier: "zh_CN")
+            f.dateFormat = "M月d日 HH:mm"
+            if leadMinutes > 0 {
+                return "抢购提醒 " + f.string(from: at) + "（提前 \(leadMinutes) 分钟）"
+            }
+            return "抢购提醒 " + f.string(from: at)
+        }
+        return remind.rawValue
+    }
 
     /// 进度值：金额型用累加金额，其余用已打卡次数
     var value: Double {
@@ -111,6 +179,13 @@ struct CreditCard: Identifiable, Codable, Hashable {
     var theme: String? = nil
     /// 自定义卡面照片（压缩后的 JPEG）；优先于主题渐变显示
     var photoData: Data? = nil
+    /// 归属人分类（自定义，如 本人 / 父亲 / 母亲）；为空表示未分类
+    var owner: String? = nil
+    /// 附属卡：指向主卡 id。为 nil 表示这是主卡；非 nil 时额度与主卡共享，且不单独计入总授信
+    var supplementaryTo: UUID? = nil
+
+    /// 是否附属卡
+    var isSupplementary: Bool { supplementaryTo != nil }
 
     var short: String {
         let s = bank.replacingOccurrences(of: "银行", with: "")
@@ -155,6 +230,8 @@ final class Store: ObservableObject {
     @Published var cards: [CreditCard] = []
     @Published var activities: [Activity] = []
     @Published var settings = AppSettings()
+    /// 自定义归属人类别（如 本人 / 父亲），侧滑栏据此筛选卡片
+    @Published var owners: [String] = ["本人"]
 
     private let storageKey = "cardkeeper.state.v1"
 
@@ -162,6 +239,8 @@ final class Store: ObservableObject {
         var cards: [CreditCard]
         var activities: [Activity]
         var settings: AppSettings
+        /// 可选：旧版本数据没有这个字段，解码为 nil
+        var owners: [String]? = nil
     }
 
     init() {
@@ -180,13 +259,42 @@ final class Store: ObservableObject {
         cards = snap.cards
         activities = snap.activities
         settings = snap.settings
+        if let saved = snap.owners, !saved.isEmpty {
+            owners = saved
+        }
+        normalizeOwners()
+        normalizeSupplementary()
         return true
     }
 
     func save() {
-        let snap = Snapshot(cards: cards, activities: activities, settings: settings)
+        let snap = Snapshot(cards: cards, activities: activities, settings: settings, owners: owners)
         guard let data = try? JSONEncoder().encode(snap) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
+    }
+
+    /// 保证类别列表非空，且每张卡的归属人都落在列表内
+    private func normalizeOwners() {
+        if owners.isEmpty { owners = ["本人"] }
+        for i in cards.indices {
+            if let o = cards[i].owner, !o.isEmpty {
+                if !owners.contains(o) { owners.append(o) }
+            } else {
+                cards[i].owner = owners.first
+            }
+        }
+    }
+
+    /// 清理指向已不存在卡片的附属关系（旧数据 / 手动改库后可能残留）
+    private func normalizeSupplementary() {
+        let ids = Set(cards.map { $0.id })
+        for i in cards.indices {
+            if let pid = cards[i].supplementaryTo {
+                if !ids.contains(pid) || pid == cards[i].id {
+                    cards[i].supplementaryTo = nil
+                }
+            }
+        }
     }
 
     // MARK: 派生
@@ -194,8 +302,14 @@ final class Store: ObservableObject {
     var totalOutstanding: Double { cards.reduce(0) { $0 + $1.outstanding } }
     var totalBill: Double { cards.reduce(0) { $0 + $1.billTotal } }
     var totalPaid: Double { cards.reduce(0) { $0 + $1.paid } }
-    var totalLimit: Double { cards.reduce(0) { $0 + $1.limit } }
     var totalUsed: Double { cards.reduce(0) { $0 + $1.used } }
+
+    /// 总授信：额度按「组」计算 —— 同银行多张主卡共享一条额度（取最高），附属卡并入主卡那一组，不做叠加
+    var totalLimit: Double {
+        Set(cards.map { limitGroupKey($0) }).reduce(0) { $0 + groupLimit($1) }
+    }
+    /// 总可用 = 总授信 - 总已用
+    var totalAvailable: Double { max(0, totalLimit - totalUsed) }
 
     var paidRatio: Double {
         totalBill > 0 ? min(1, totalPaid / totalBill) : 0
@@ -211,9 +325,241 @@ final class Store: ObservableObject {
         cards.first { $0.id == id }
     }
 
+    // MARK: 共享额度（同银行多卡 + 附属卡共享主卡额度）
+
+    /// 银行归一化：忽略「银行」后缀、全半角空格与首尾空白，"招商" 与 "招商银行" 视为同一家
+    func bankKey(_ bank: String) -> String {
+        let k = bank
+            .replacingOccurrences(of: "银行", with: "")
+            .replacingOccurrences(of: "信用卡", with: "")
+            .replacingOccurrences(of: " ", with: "")
+            .replacingOccurrences(of: "　", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return k.isEmpty ? bank.trimmingCharacters(in: .whitespacesAndNewlines) : k
+    }
+
+    /// 追溯主卡链的根（附属卡 → 主卡 → 若主卡本身也是附属卡则继续向上，最多 8 层防脏数据成环）
+    func limitAnchor(for card: CreditCard) -> CreditCard {
+        var cur = card
+        var hops = 0
+        while let pid = cur.supplementaryTo, hops < 8 {
+            guard let parent = self.card(pid) else { break }
+            cur = parent
+            hops += 1
+        }
+        return cur
+    }
+
+    /// 额度组 key：附属卡一律并入主卡所在银行的那一组
+    func limitGroupKey(_ card: CreditCard) -> String {
+        bankKey(limitAnchor(for: card).bank)
+    }
+
+    /// 某个额度组的共享总额度 = 组内「主卡」中填写的最高额度（附属卡不参与决定）
+    func groupLimit(_ key: String) -> Double {
+        let members = cards.filter { limitGroupKey($0) == key }
+        let primaries = members.filter { $0.supplementaryTo == nil }
+        if !primaries.isEmpty {
+            return primaries.map { $0.limit }.max() ?? 0
+        }
+        return members.map { $0.limit }.max() ?? 0
+    }
+
+    /// 某银行的共享总额度（含附属卡所在组）
+    func sharedLimit(forBank bank: String) -> Double {
+        groupLimit(bankKey(bank))
+    }
+
+    /// 某额度组全部卡的合计已用（主卡与附属卡的消费都占用同一条额度）
+    func bankUsed(forBank bank: String) -> Double {
+        let key = bankKey(bank)
+        return cards.filter { limitGroupKey($0) == key }.reduce(0) { $0 + $1.used }
+    }
+
+    /// 某张卡所在组的剩余可用额度
+    func bankAvailable(for card: CreditCard) -> Double {
+        let key = limitGroupKey(card)
+        return max(0, groupLimit(key) - bankUsed(forBank: key))
+    }
+
+    /// 某张卡所在组占共享额度的比例
+    func sharedUsedRatio(for card: CreditCard) -> Double {
+        let key = limitGroupKey(card)
+        let l = groupLimit(key)
+        return l > 0 ? min(1, bankUsed(forBank: key) / l) : 0
+    }
+
+    /// 可被选为主卡的卡片（排除附属卡本身，避免链式附属）
+    func primaryCandidates(excluding id: UUID?) -> [CreditCard] {
+        cards.filter { $0.supplementaryTo == nil && $0.id != id }
+    }
+
+    /// 某张主卡名下的附属卡
+    func supplements(of primaryID: UUID) -> [CreditCard] {
+        cards.filter { $0.supplementaryTo == primaryID }
+    }
+
+    struct BankLimit: Identifiable {
+        var id: String
+        var name: String
+        var count: Int
+        var limit: Double
+        var used: Double
+        /// 组内附属卡数量
+        var supplementary: Int = 0
+        var ratio: Double { limit > 0 ? min(1, used / limit) : 0 }
+        var available: Double { max(0, limit - used) }
+    }
+
+    /// 按额度组汇总（同银行多卡、主附卡都只算一次，用于统计页展示）
+    var bankLimits: [BankLimit] {
+        var order: [String] = []
+        var names: [String: String] = [:]
+        for c in cards {
+            let k = limitGroupKey(c)
+            if !order.contains(k) {
+                order.append(k)
+                names[k] = limitAnchor(for: c).bank
+            }
+        }
+        return order.map { k in
+            let same = cards.filter { limitGroupKey($0) == k }
+            return BankLimit(id: k,
+                             name: names[k] ?? k,
+                             count: same.count,
+                             limit: groupLimit(k),
+                             used: bankUsed(forBank: k),
+                             supplementary: same.filter { $0.supplementaryTo != nil }.count)
+        }
+    }
+
     func cardName(_ id: UUID) -> String {
         guard let c = card(id) else { return "未知卡片" }
         return c.short + " ••" + c.last4
+    }
+
+    /// 附属卡的角标文案，如「附属 · 招商 ••4832」；主卡返回 nil
+    func supplementaryLabel(for card: CreditCard) -> String? {
+        guard let pid = card.supplementaryTo, let p = self.card(pid) else { return nil }
+        return "附属 · " + p.short + " ••" + p.last4
+    }
+
+    // MARK: 归属人分类
+
+    /// 卡片归属人（未设置时归到第一个类别）
+    func ownerName(of card: CreditCard) -> String {
+        if let o = card.owner, !o.isEmpty { return o }
+        return owners.first ?? "本人"
+    }
+
+    /// 按归属人筛选（nil = 全部）
+    func ownedCards(_ owner: String?) -> [CreditCard] {
+        guard let owner = owner else { return cards }
+        return cards.filter { ownerName(of: $0) == owner }
+    }
+
+    /// 展示顺序：主卡在前，其附属卡紧跟其后
+    func sortedForDisplay(_ list: [CreditCard]) -> [CreditCard] {
+        var result: [CreditCard] = []
+        var placed = Set<UUID>()
+
+        for c in list where c.supplementaryTo == nil && !placed.contains(c.id) {
+            result.append(c)
+            placed.insert(c.id)
+            for s in list where s.supplementaryTo == c.id && !placed.contains(s.id) {
+                result.append(s)
+                placed.insert(s.id)
+            }
+        }
+        // 兜底：主卡不在当前筛选结果里的附属卡，仍要显示
+        for c in list where !placed.contains(c.id) {
+            result.append(c)
+            placed.insert(c.id)
+        }
+        return result
+    }
+
+    func addOwner(_ name: String) {
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty, !owners.contains(n) else { return }
+        owners.append(n)
+        save()
+    }
+
+    /// 重命名类别：为空或重复时自动合并到已有类别
+    func renameOwner(at index: Int, to newName: String) {
+        guard owners.indices.contains(index) else { return }
+        let n = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return }
+        let old = owners[index]
+        guard old != n else { return }
+        if owners.contains(n) {
+            // 合并到已有类别
+            for i in cards.indices where ownerName(of: cards[i]) == old {
+                cards[i].owner = n
+            }
+            owners.remove(at: index)
+        } else {
+            owners[index] = n
+            for i in cards.indices where ownerName(of: cards[i]) == old {
+                cards[i].owner = n
+            }
+        }
+        save()
+    }
+
+    /// 删除类别：其下卡片转移到剩余的第一个类别
+    func deleteOwner(at index: Int) {
+        guard owners.indices.contains(index), owners.count > 1 else { return }
+        let old = owners[index]
+        owners.remove(at: index)
+        let fallback = owners.first ?? "本人"
+        for i in cards.indices where ownerName(of: cards[i]) == old {
+            cards[i].owner = fallback
+        }
+        save()
+    }
+
+    // MARK: 活动分组与收益
+
+    struct ActivityGroup: Identifiable {
+        var id: UUID
+        var card: CreditCard?
+        var acts: [Activity]
+        var earned: Double { acts.reduce(0) { $0 + $1.earned } }
+        var reward: Double { acts.reduce(0) { $0 + $1.reward } }
+    }
+
+    /// 按卡片分组：同一张卡的活动归到一组，卡片顺序与卡包一致
+    func activityGroups(_ list: [Activity]) -> [ActivityGroup] {
+        var groups: [ActivityGroup] = []
+        for card in cards {
+            let acts = list.filter { $0.cardID == card.id }
+            if !acts.isEmpty {
+                groups.append(ActivityGroup(id: card.id, card: card, acts: acts))
+            }
+        }
+        let known = Set(cards.map { $0.id })
+        let orphans = list.filter { !known.contains($0.cardID) }
+        if !orphans.isEmpty {
+            groups.append(ActivityGroup(id: UUID(), card: nil, acts: orphans))
+        }
+        return groups
+    }
+
+    var totalEarned: Double { activities.reduce(0) { $0 + $1.earned } }
+    var totalReward: Double { activities.reduce(0) { $0 + $1.reward } }
+
+    func setReward(activityID: UUID, reward: Double) {
+        guard let i = activities.firstIndex(where: { $0.id == activityID }) else { return }
+        activities[i].reward = max(0, reward)
+        save()
+    }
+
+    func setEarned(activityID: UUID, earned: Double) {
+        guard let i = activities.firstIndex(where: { $0.id == activityID }) else { return }
+        activities[i].earned = max(0, earned)
+        save()
     }
 
     func categoryTotals() -> [(name: String, value: Double, color: String)] {
@@ -296,6 +642,10 @@ final class Store: ObservableObject {
     func deleteCard(_ id: UUID) {
         cards.removeAll { $0.id == id }
         activities.removeAll { $0.cardID == id }
+        // 主卡被删后，其附属卡自动转为独立卡，避免留下指向空 id 的孤儿
+        for i in cards.indices where cards[i].supplementaryTo == id {
+            cards[i].supplementaryTo = nil
+        }
         save()
     }
 
@@ -346,17 +696,28 @@ final class Store: ObservableObject {
                 Transaction(merchant: "日上免税行", category: "购物", amount: 682.00, date: DateHelp.thisMonth(day: 4))
             ])
 
-        cards = [c1, c2, c3, c4]
+        // 招行附属卡：额度与主卡共享，不单独计入总授信
+        let c5 = CreditCard(
+            bank: "招商银行", name: "全币种国际卡（附属）", org: "VISA", last4: "6627",
+            limit: 80000, used: 4260, billDay: 5, dueDay: 23, paid: 0,
+            colorA: "2C3550", colorB: "55638C", remind: true, remindDays: 3,
+            items: [
+                Transaction(merchant: "山姆会员店", category: "超市", amount: 1280.00, date: DateHelp.thisMonth(day: 15)),
+                Transaction(merchant: "全家便利店", category: "超市", amount: 46.50, date: DateHelp.thisMonth(day: 13))
+            ],
+            supplementaryTo: c1.id)
+
+        cards = [c1, c2, c3, c4, c5]
 
         activities = [
             Activity(cardID: c1.id, title: "月月刷 · 满 3000 返 100",
                      detail: "当月累计消费满 3,000 元，次月返 100 元刷卡金",
                      kind: .amount, target: 3000, current: 2173,
-                     deadline: DateHelp.thisMonth(day: 30), remind: .weeklySunday),
+                     deadline: DateHelp.thisMonth(day: 30), remind: .weeklySunday, reward: 100),
 
             Activity(cardID: c2.id, title: "最红星期五 · 5 折",
                      detail: "每周五单笔满 100 元享 5 折，每月最多 4 次",
-                     kind: .count, target: 4, deadline: DateHelp.thisMonth(day: 30), remind: .weeklyFriday,
+                     kind: .count, target: 4, deadline: DateHelp.thisMonth(day: 30), remind: .weeklyFriday, reward: 80,
                      steps: [
                         ActivityStep(label: "第 1 周 · 已完成", done: true),
                         ActivityStep(label: "第 2 周 · 已完成", done: true),
@@ -366,7 +727,7 @@ final class Store: ObservableObject {
 
             Activity(cardID: c3.id, title: "加油返现 8%",
                      detail: "每月在中石油 / 中石化消费 2 笔，返现 8%",
-                     kind: .count, target: 2, deadline: DateHelp.thisMonth(day: 30), remind: .monthlyFirst,
+                     kind: .count, target: 2, deadline: DateHelp.thisMonth(day: 30), remind: .monthlyFirst, reward: 60, earned: 60,
                      steps: [
                         ActivityStep(label: "第 1 笔加油", done: true),
                         ActivityStep(label: "第 2 笔加油", done: true)
@@ -374,7 +735,7 @@ final class Store: ObservableObject {
 
             Activity(cardID: c4.id, title: "超市满 200 减 30",
                      detail: "指定超市单笔满 200 元立减 30 元，每月 1 次",
-                     kind: .once, target: 1, deadline: DateHelp.thisMonth(day: 25), remind: .dayBefore,
+                     kind: .once, target: 1, deadline: DateHelp.thisMonth(day: 25), remind: .dayBefore, reward: 30,
                      steps: [ActivityStep(label: "完成一笔满 200 元消费", done: false)])
         ]
 

@@ -7,19 +7,37 @@ struct HomeView: View {
     private enum Sheet: Identifiable {
         case edit(CreditCard)
         case add
+        case owners
 
         var id: String {
             switch self {
             case .edit(let card): return card.id.uuidString
             case .add: return "new-card"
+            case .owners: return "manage-owners"
             }
         }
     }
 
     @State private var sheet: Sheet?
+    @State private var drawerOpen = false
+    @State private var ownerFilter: String? = nil
+
+    private var shownCards: [CreditCard] { store.sortedForDisplay(store.ownedCards(ownerFilter)) }
+
+    private var shownOutstanding: Double { shownCards.reduce(0) { $0 + $1.outstanding } }
+    private var shownBill: Double { shownCards.reduce(0) { $0 + $1.billTotal } }
+    private var shownPaid: Double { shownCards.reduce(0) { $0 + $1.paid } }
+    private var shownPaidRatio: Double {
+        shownBill > 0 ? min(1, shownPaid / shownBill) : 0
+    }
+    private var shownNearest: CreditCard? {
+        shownCards.filter { !$0.isCleared }
+            .sorted { DateHelp.daysToDue($0.dueDay) < DateHelp.daysToDue($1.dueDay) }
+            .first
+    }
 
     var body: some View {
-        ZStack {
+        ZStack(alignment: .leading) {
             Palette.bg.ignoresSafeArea()
 
             ScrollView(showsIndicators: false) {
@@ -32,7 +50,8 @@ struct HomeView: View {
                         .padding(.horizontal, 20)
                         .padding(.top, 16)
 
-                    SectionHeader(title: "我的卡片", trailing: "\(store.cards.count) 张 · 左右滑动")
+                    SectionHeader(title: ownerFilter.map { "\($0)的卡片" } ?? "我的卡片",
+                                  trailing: "\(shownCards.count) 张 · 左右滑动")
                         .padding(.horizontal, 20)
 
                     cardStrip
@@ -51,15 +70,172 @@ struct HomeView: View {
                         .padding(.bottom, 18)
                 }
             }
+
+            // 从屏幕左边缘右滑打开分类栏（只占 22pt，不影响正常滑动）
+            if !drawerOpen {
+                HStack(spacing: 0) {
+                    Rectangle()
+                        .fill(Color.clear)
+                        .frame(width: 22)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            DragGesture(minimumDistance: 15)
+                                .onEnded { value in
+                                    if value.translation.width > 40 { openDrawer() }
+                                }
+                        )
+                    Spacer(minLength: 0)
+                }
+                .ignoresSafeArea()
+            }
+
+            if drawerOpen {
+                Color.black.opacity(0.30)
+                    .ignoresSafeArea()
+                    .onTapGesture { closeDrawer() }
+
+                drawer
+            }
         }
+        .animation(.easeOut(duration: 0.22), value: drawerOpen)
         .sheet(item: $sheet) { item in
             switch item {
             case .edit(let card):
                 CardEditorView(card: card).environmentObject(store)
             case .add:
-                CardEditorView(card: CreditCard.empty, isNew: true).environmentObject(store)
+                CardEditorView(card: CreditCard.empty, isNew: true, defaultOwner: ownerFilter)
+                    .environmentObject(store)
+            case .owners:
+                OwnerManagerView().environmentObject(store)
             }
         }
+    }
+
+    private func openDrawer() {
+        drawerOpen = true
+    }
+
+    private func closeDrawer() {
+        drawerOpen = false
+    }
+
+    // MARK: 侧滑栏
+
+    private var drawer: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("卡片分类")
+                        .font(.system(size: 21, weight: .bold))
+                        .foregroundColor(.white)
+                    Text("按归属人查看卡片")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(.white.opacity(0.5))
+                }
+
+                Spacer()
+
+                Button {
+                    closeDrawer()
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.white.opacity(0.8))
+                        .frame(width: 28, height: 28)
+                        .background(Color.white.opacity(0.10))
+                        .clipShape(Circle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 64)
+            .padding(.bottom, 18)
+
+            ScrollView(showsIndicators: false) {
+                VStack(spacing: 5) {
+                    drawerRow(title: "全部卡片",
+                              subtitle: "\(store.cards.count) 张",
+                              selected: ownerFilter == nil) {
+                        ownerFilter = nil
+                        closeDrawer()
+                    }
+
+                    ForEach(store.owners, id: \.self) { o in
+                        drawerRow(title: o,
+                                  subtitle: "\(store.ownedCards(o).count) 张",
+                                  selected: ownerFilter == o) {
+                            ownerFilter = o
+                            closeDrawer()
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+            }
+
+            Divider()
+                .background(Color.white.opacity(0.10))
+
+            Button {
+                closeDrawer()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.26) {
+                    sheet = .owners
+                }
+            } label: {
+                HStack(spacing: 9) {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 13, weight: .medium))
+                    Text("管理分类")
+                        .font(.system(size: 14, weight: .medium))
+                    Spacer()
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.35))
+                }
+                .foregroundColor(.white.opacity(0.85))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 16)
+            }
+            .buttonStyle(.plain)
+            .padding(.bottom, 20)
+        }
+        .frame(width: 268)
+        .frame(maxHeight: .infinity)
+        .background(LinearGradient(colors: [Color(hex: "242A3F"), Color(hex: "161925")],
+                                   startPoint: .top, endPoint: .bottom))
+        .ignoresSafeArea()
+        .transition(.move(edge: .leading))
+    }
+
+    private func drawerRow(title: String, subtitle: String,
+                           selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(selected ? Color.white.opacity(0.20) : Color.white.opacity(0.07))
+                    Text(String(title.prefix(1)))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.9))
+                }
+                .frame(width: 30, height: 30)
+
+                Text(title)
+                    .font(.system(size: 14, weight: selected ? .semibold : .regular))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                Text(subtitle)
+                    .font(.system(size: 11))
+                    .foregroundColor(.white.opacity(0.4))
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .background(selected ? Color.white.opacity(0.10) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 
     // MARK: 顶部
@@ -76,6 +252,26 @@ struct HomeView: View {
             }
 
             Spacer()
+
+            Button {
+                openDrawer()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 11, weight: .bold))
+                    Text(ownerFilter ?? "全部")
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .foregroundColor(Palette.text)
+                .padding(.horizontal, 11)
+                .frame(height: 32)
+                .background(Color(hex: "767680").opacity(0.12))
+                .clipShape(Capsule())
+            }
+            .buttonStyle(.plain)
 
             Button {
                 sheet = .add
@@ -95,11 +291,11 @@ struct HomeView: View {
 
     private var overview: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("本月应还合计")
+            Text(ownerFilter.map { "\($0)名下应还合计" } ?? "本月应还合计")
                 .font(.system(size: 12.5))
                 .foregroundColor(.white.opacity(0.58))
 
-            Text(Fmt.money(store.totalOutstanding))
+            Text(Fmt.money(shownOutstanding))
                 .font(.system(size: 36, weight: .bold))
                 .foregroundColor(.white)
                 .lineLimit(1)
@@ -107,14 +303,14 @@ struct HomeView: View {
                 .padding(.top, 4)
 
             HStack(spacing: 8) {
-                Text("\(store.cards.count) 张卡 · 已还 " + Fmt.money(store.totalPaid))
+                Text("\(shownCards.count) 张卡 · 已还 " + Fmt.money(shownPaid))
                     .font(.system(size: 12))
                     .foregroundColor(.white.opacity(0.62))
                     .lineLimit(1)
 
                 Spacer(minLength: 4)
 
-                if let nearest = store.nearestCard {
+                if let nearest = shownNearest {
                     PillView(text: nearest.short + " " + nearest.dueLabel,
                              fg: Color(hex: "FFCF8A"),
                              bg: Color(hex: "FF9F0A").opacity(0.16))
@@ -126,12 +322,12 @@ struct HomeView: View {
             }
             .padding(.top, 9)
 
-            BarView(value: store.paidRatio, height: 5)
+            BarView(value: shownPaidRatio, height: 5)
                 .padding(.top, 14)
 
             HStack(spacing: 14) {
-                legendDot(Color(hex: "6E8BFF"), "已还 \(Int(store.paidRatio * 100))%")
-                legendDot(Color.white.opacity(0.25), "账单合计 " + Fmt.money(store.totalBill))
+                legendDot(Color(hex: "6E8BFF"), "已还 \(Int(shownPaidRatio * 100))%")
+                legendDot(Color.white.opacity(0.25), "账单合计 " + Fmt.money(shownBill))
                 Spacer()
             }
             .padding(.top, 11)
@@ -158,12 +354,29 @@ struct HomeView: View {
     private var cardStrip: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
-                ForEach(store.cards) { card in
-                    CardFace(card: card)
-                        .frame(width: 296)
-                        .onTapGesture {
-                            sheet = .edit(card)
-                        }
+                if shownCards.isEmpty {
+                    VStack(spacing: 7) {
+                        Image(systemName: "creditcard")
+                            .font(.system(size: 22))
+                            .foregroundColor(Color(hex: "B8B8BE"))
+                        Text("「\(ownerFilter ?? "")」名下还没有卡片")
+                            .font(.system(size: 12.5))
+                            .foregroundColor(Color(hex: "A0A0A5"))
+                        Text("点右上角 + 添加，编辑卡片时选择归属人")
+                            .font(.system(size: 11))
+                            .foregroundColor(Color(hex: "A0A0A5").opacity(0.75))
+                    }
+                    .frame(width: 296, height: 180)
+                    .background(Palette.surface)
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                } else {
+                    ForEach(shownCards) { card in
+                        CardFace(card: card, supplementaryLabel: store.supplementaryLabel(for: card))
+                            .frame(width: 296)
+                            .onTapGesture {
+                                sheet = .edit(card)
+                            }
+                    }
                 }
             }
             .padding(.horizontal, 20)
@@ -279,4 +492,118 @@ struct AlertItem: Identifiable {
     var subtitle: String
     var trailing: String
     var warning: Bool
+}
+
+// MARK: - 分类管理
+
+struct OwnerManagerView: View {
+    @EnvironmentObject var store: Store
+    @Environment(\.dismiss) var dismiss
+
+    @State private var newName = ""
+    @State private var editingIndex: Int? = nil
+    @State private var editingName = ""
+    @State private var showRename = false
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section {
+                    HStack {
+                        TextField("如 父亲 / 母亲 / 配偶", text: $newName)
+                        Button("添加") {
+                            store.addOwner(newName)
+                            newName = ""
+                        }
+                        .disabled(newName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                } header: {
+                    Text("新增分类")
+                }
+
+                Section {
+                    ForEach(Array(store.owners.indices), id: \.self) { index in
+                        HStack {
+                            Text(store.owners[index])
+                            Spacer()
+                            Text("\(store.ownedCards(store.owners[index]).count) 张")
+                                .font(.system(size: 12))
+                                .foregroundColor(Palette.sub)
+
+                            Button {
+                                editingIndex = index
+                                editingName = store.owners[index]
+                                showRename = true
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 13))
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundColor(Palette.blue)
+                        }
+                    }
+                    .onDelete { offsets in
+                        for i in offsets.sorted(by: >) {
+                            store.deleteOwner(at: i)
+                        }
+                    }
+                } header: {
+                    Text("已有分类")
+                } footer: {
+                    Text("左滑删除分类，点铅笔改名。删除后该分类下的卡片会转移到第一个分类。")
+                        .font(.system(size: 11.5))
+                }
+
+                Section {
+                    Text("卡片的归属人在「编辑卡片 → 归属与分类」里修改；首页左上角的分类按钮和左边缘右滑都能打开分类栏。")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(Palette.sub)
+                }
+            }
+            .navigationTitle("管理分类")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("完成") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showRename) {
+                renameSheet
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+    }
+
+    private var renameSheet: some View {
+        NavigationView {
+            Form {
+                Section("分类名称") {
+                    TextField("名称", text: $editingName)
+                }
+                Section {
+                    Button {
+                        if let i = editingIndex {
+                            store.renameOwner(at: i, to: editingName)
+                        }
+                        showRename = false
+                    } label: {
+                        Text("保存")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 4)
+                    }
+                    .listRowBackground(Palette.primaryButton)
+                }
+            }
+            .navigationTitle("重命名分类")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("取消") { showRename = false }
+                }
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+    }
 }
