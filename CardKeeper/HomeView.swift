@@ -220,7 +220,7 @@ struct HomeView: View {
             }
             .buttonStyle(.plain)
 
-            Text("卡管家 v1.6")
+            Text("卡管家 v1.8")
                 .font(.system(size: 10))
                 .foregroundColor(.white.opacity(0.28))
                 .padding(.horizontal, 20)
@@ -423,11 +423,12 @@ struct HomeView: View {
             .sorted { DateHelp.daysToDue($0.dueDay) < DateHelp.daysToDue($1.dueDay) }
 
         for c in owing.prefix(2) {
+            let cbText = c.cycleCashback > 0 ? " · 已抵刷卡金 " + Fmt.yuan(c.cycleCashback) : ""
             list.append(AlertItem(
                 icon: "还",
                 color: Palette.red,
                 title: c.bank + " 还款提醒",
-                subtitle: "每月 \(c.dueDay) 日 · " + c.dueLabel,
+                subtitle: "每月 \(c.dueDay) 日 · " + c.dueLabel + cbText,
                 trailing: Fmt.money(c.outstanding),
                 warning: true))
         }

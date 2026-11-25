@@ -12,12 +12,14 @@ struct ActivitiesView: View {
         case detail(Activity)
         case add
         case earnings
+        case cashback
 
         var id: String {
             switch self {
             case .detail(let act): return act.id.uuidString
             case .add: return "new-activity"
             case .earnings: return "earnings-list"
+            case .cashback: return "record-cashback"
             }
         }
     }
@@ -62,6 +64,8 @@ struct ActivitiesView: View {
                 ActivityEditorView().environmentObject(store)
             case .earnings:
                 EarningsListView().environmentObject(store)
+            case .cashback:
+                CashbackRecordView().environmentObject(store)
             }
         }
     }
@@ -148,40 +152,60 @@ struct ActivitiesView: View {
         }
     }
 
-    /// 活动收益总览（点开看每一笔到账）
+    /// 活动收益总览（点开看每一笔到账）+ 记收入入口
     private var earnStrip: some View {
-        Button {
-            sheet = .earnings
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "yensign.circle.fill")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(Palette.orange)
+        HStack(spacing: 8) {
+            Button {
+                sheet = .earnings
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "yensign.circle.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(Palette.orange)
 
-                Text("活动收益")
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundColor(Palette.text)
+                    Text("活动收益")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundColor(Palette.text)
 
-                Spacer()
+                    Spacer()
 
-                Text("已到账 " + Fmt.yuan(store.totalEarned))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundColor(Palette.green)
+                    Text("已到账 " + Fmt.yuan(store.totalEarned))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(Palette.green)
 
-                Text("预期 " + Fmt.yuan(store.totalReward))
-                    .font(.system(size: 11.5))
-                    .foregroundColor(Palette.sub)
+                    Text("预期 " + Fmt.yuan(store.totalReward))
+                        .font(.system(size: 11.5))
+                        .foregroundColor(Palette.sub)
 
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundColor(Palette.sub)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(Palette.sub)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+                .background(Palette.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 11)
-            .background(Palette.surface)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .buttonStyle(.plain)
+
+            Button {
+                sheet = .cashback
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "plus.circle.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(Palette.orange)
+                    Text("记收入")
+                        .font(.system(size: 12.5, weight: .medium))
+                        .foregroundColor(Palette.text)
+                }
+                .padding(.horizontal, 13)
+                .padding(.vertical, 11)
+                .background(Palette.surface)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+            .buttonStyle(.plain)
         }
-        .buttonStyle(.plain)
     }
 
     private var nearestHint: String {        let pending = store.activities.filter { !$0.isDone }
@@ -1126,6 +1150,34 @@ struct EarningsListView: View {
                     .padding(.vertical, 4)
                 }
 
+                if store.totalCycleCashback > 0 {
+                    Section {
+                        HStack(alignment: .firstTextBaseline) {
+                            Text("本账单周期刷卡金")
+                                .font(.system(size: 13))
+                                .foregroundColor(Palette.text)
+                            Spacer()
+                            Text("+" + Fmt.money(store.totalCycleCashback))
+                                .font(.system(size: 15, weight: .bold))
+                                .foregroundColor(Palette.green)
+                        }
+                        ForEach(store.cards.filter { $0.cycleCashback > 0 }) { c in
+                            HStack {
+                                Text(c.bank + " " + c.name)
+                                    .font(.system(size: 12))
+                                    .foregroundColor(Palette.sub)
+                                Spacer()
+                                Text("抵扣后应还 " + Fmt.money(c.outstanding))
+                                    .font(.system(size: 11))
+                                    .foregroundColor(Palette.sub)
+                                Text("+" + Fmt.money(c.cycleCashback))
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundColor(Palette.green)
+                            }
+                        }
+                    }
+                }
+
                 if groups.isEmpty {
                     Section {
                         Text("还没有到账记录。在活动详情页点「记一笔到账」即可累积。")
@@ -1177,5 +1229,184 @@ struct EarningsListView: View {
             }
         }
         .navigationViewStyle(StackNavigationViewStyle())
+    }
+}
+
+// MARK: - 记收入（刷卡金 / 返现）
+
+/// 记一笔刷卡金：保存后自动抵扣该卡本期应还
+struct CashbackRecordView: View {
+    @EnvironmentObject var store: Store
+    @Environment(\.dismiss) var dismiss
+
+    @State private var cardID: UUID? = nil
+    @State private var amountText = ""
+    @State private var note = ""
+    @State private var savedOutstanding: Double? = nil
+    /// 记录前的应还（用于展示抵扣效果）
+    @State private var beforeOutstanding: Double = 0
+
+    private var amount: Double { Double(amountText) ?? 0 }
+
+    private var selectedCard: CreditCard? {
+        store.cards.first(where: { $0.id == cardID })
+    }
+
+    private var amountBinding: Binding<String> {
+        Binding(get: { amountText }, set: {
+            amountText = $0.filter { "0123456789.".contains($0) }
+        })
+    }
+
+    var body: some View {
+        NavigationView {
+            Form {
+                if store.cards.isEmpty {
+                    Section {
+                        Text("还没有卡片，先去「卡片」页添加一张。")
+                            .font(.system(size: 13))
+                            .foregroundColor(Palette.sub)
+                    }
+                } else {
+                    Section("哪张卡的返现") {
+                        Picker("卡片", selection: $cardID) {
+                            Text("请选择").tag(UUID?.none)
+                            ForEach(store.cards) { c in
+                                Text(c.bank + " " + c.name + " 尾号" + c.last4).tag(UUID?.some(c.id))
+                            }
+                        }
+                    }
+
+                    if let card = selectedCard {
+                        Section {
+                            HStack(alignment: .firstTextBaseline) {
+                                Text("本账单周期已获得")
+                                    .font(.system(size: 13))
+                                    .foregroundColor(Palette.text)
+                                Spacer()
+                                Text("+" + Fmt.money(card.cycleCashback))
+                                    .font(.system(size: 17, weight: .bold))
+                                    .foregroundColor(Palette.green)
+                            }
+                            Text(Fmt.monthDay(card.cycleStart) + " 起 · 至下次账单日（每月 \(card.billDay) 日）")
+                                .font(.system(size: 11))
+                                .foregroundColor(Palette.sub)
+                        } header: {
+                            Text("刷卡金进度")
+                        }
+                    }
+
+                    Section("这笔收入") {
+                        HStack {
+                            Text("金额")
+                            Spacer()
+                            Text("¥").foregroundColor(Palette.sub)
+                            TextField("0.00", text: amountBinding)
+                                .keyboardType(.decimalPad)
+                                .multilineTextAlignment(.trailing)
+                                .frame(width: 120)
+                        }
+                        TextField("备注，如 10 月刷卡金 / 消费返现", text: $note)
+                    }
+
+                    if let card = selectedCard, amount > 0, savedOutstanding == nil {
+                        Section {
+                            HStack {
+                                Text("保存后自动抵扣该卡本期应还")
+                                    .font(.system(size: 12.5))
+                                    .foregroundColor(Palette.sub)
+                                Spacer()
+                                Text(Fmt.money(card.outstanding) + " → " + Fmt.money(max(0, card.outstanding - amount)))
+                                    .font(.system(size: 12.5, weight: .semibold))
+                                    .foregroundColor(Palette.green)
+                            }
+                        } header: {
+                            Text("自动扣减账单")
+                        }
+                    }
+
+                    Section {
+                        if let after = savedOutstanding {
+                            Text("已记入，抵扣后该卡本期应还 " + Fmt.money(after))
+                                .font(.system(size: 12.5))
+                                .foregroundColor(Palette.green)
+
+                            Button {
+                                dismiss()
+                            } label: {
+                                Text("完成")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 4)
+                            }
+                            .listRowBackground(Palette.primaryButton)
+                        } else {
+                            Button {
+                                save()
+                            } label: {
+                                Text("保存并抵扣账单")
+                                    .font(.system(size: 16, weight: .semibold))
+                                    .foregroundColor(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 4)
+                            }
+                            .listRowBackground(Palette.primaryButton)
+                            .disabled(cardID == nil || amount <= 0)
+                        }
+                    }
+
+                    if let card = selectedCard, !card.cashbackList.isEmpty {
+                        Section {
+                            ForEach(card.cashbackList) { cb in
+                                HStack(spacing: 10) {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(cb.note.isEmpty ? "刷卡金" : cb.note)
+                                            .font(.system(size: 13))
+                                            .foregroundColor(Palette.text)
+                                        Text(Fmt.monthDay(cb.date))
+                                            .font(.system(size: 10.5))
+                                            .foregroundColor(Palette.sub)
+                                    }
+                                    Spacer()
+                                    Text("+" + Fmt.money(cb.amount))
+                                        .font(.system(size: 13, weight: .semibold))
+                                        .foregroundColor(Palette.green)
+                                }
+                            }
+                            .onDelete { offsets in
+                                guard let card = selectedCard else { return }
+                                let ids = offsets.map { card.cashbackList[$0].id }
+                                for id in ids {
+                                    store.deleteCashback(cardID: card.id, id: id)
+                                }
+                            }
+                        } header: {
+                            Text("该卡刷卡金记录（左滑删除）")
+                        } footer: {
+                            Text("删除记录后，对应的抵扣金额会从应还里恢复。")
+                                .font(.system(size: 11.5))
+                        }
+                    }
+                }
+            }
+            .navigationTitle("记收入")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("关闭") { dismiss() }
+                }
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
+        .onAppear {
+            if cardID == nil { cardID = store.cards.first?.id }
+        }
+    }
+
+    private func save() {
+        guard let card = selectedCard, amount > 0 else { return }
+        beforeOutstanding = card.outstanding
+        savedOutstanding = store.addCashback(cardID: card.id, amount: amount, note: note)
     }
 }

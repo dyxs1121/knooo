@@ -110,7 +110,8 @@ struct BillsView: View {
     private var summary: some View {
         let total = scopedCards.reduce(0) { $0 + $1.billTotal }
         let paid = scopedCards.reduce(0) { $0 + $1.paid }
-        let due = max(0, total - paid)
+        let cashback = scopedCards.reduce(0) { $0 + $1.cycleCashback }
+        let due = max(0, total - paid - cashback)
 
         return VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top) {
@@ -124,10 +125,13 @@ struct BillsView: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                         .padding(.top, 2)
-                    Text("待还金额 · 账单合计 " + Fmt.money(total))
+                    Text(cashback > 0
+                         ? "待还金额 · 账单合计 " + Fmt.money(total) + " · 已抵刷卡金 " + Fmt.money(cashback)
+                         : "待还金额 · 账单合计 " + Fmt.money(total))
                         .font(.system(size: 11.5))
                         .foregroundColor(Palette.sub)
                         .padding(.top, 2)
+                        .lineLimit(2)
                 }
 
                 Spacer(minLength: 8)

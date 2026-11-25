@@ -10,6 +10,35 @@ struct Transaction: Identifiable, Codable, Hashable {
     var date: Date
 }
 
+// MARK: - 快捷指令传入的支付参数
+
+/// 快捷指令通过 URL Scheme 调起 App：
+/// cardkeeper://record?card=尾号或名称&amount=12.5&merchant=星巴克&category=餐饮
+struct QuickPayment: Identifiable {
+    var id = UUID()
+    /// 卡片线索：支持尾号 / 卡名 / 银行名，为空则打开后手动选
+    var cardQuery: String = ""
+    var amount: Double = 0
+    var merchant: String = ""
+    var category: String = ""
+
+    static func from(url: URL) -> QuickPayment? {
+        guard url.scheme?.lowercased() == "cardkeeper" else { return nil }
+        guard let comps = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return nil }
+        var p = QuickPayment()
+        for item in comps.queryItems ?? [] {
+            switch item.name {
+            case "card": p.cardQuery = item.value ?? ""
+            case "amount": p.amount = Double(item.value ?? "") ?? 0
+            case "merchant": p.merchant = item.value ?? ""
+            case "category", "note": p.category = item.value ?? ""
+            default: break
+            }
+        }
+        return p
+    }
+}
+
 // MARK: - 活动
 
 enum ActivityKind: String, Codable, CaseIterable, Identifiable {
@@ -218,6 +247,8 @@ struct CreditCard: Identifiable, Codable, Hashable {
     var owner: String? = nil
     /// 附属卡：指向主卡 id。为 nil 表示这是主卡；非 nil 时额度与主卡共享，且不单独计入总授信
     var supplementaryTo: UUID? = nil
+    /// 刷卡金/返现收入记录；可选字段保证旧数据解码兼容
+    var cashbacks: [Cashback]? = nil
     /// 年费与免年费规则（可选，旧数据为 nil 视为无年费）
     var fee: CardFee? = nil
     /// 账单日前一天提醒（可选，旧数据默认开启）
@@ -238,7 +269,27 @@ struct CreditCard: Identifiable, Codable, Hashable {
 
     var billTotal: Double { items.reduce(0) { $0 + $1.amount } }
 
-    var outstanding: Double { max(0, billTotal - paid) }
+    var cashbackList: [Cashback] { cashbacks ?? [] }
+
+    /// 当前账单周期起点 = 最近一个已过的账单日（本月账单日未到则取上月同日）
+    var cycleStart: Date {
+        let today = DateHelp.cal.startOfDay(for: Date())
+        var c = DateHelp.cal.dateComponents([.year, .month], from: today)
+        c.day = min(max(billDay, 1), 28)
+        let d = DateHelp.cal.date(from: c) ?? today
+        if d <= today { return d }
+        return DateHelp.cal.date(byAdding: .month, value: -1, to: d) ?? d
+    }
+
+    /// 本账单周期内获得的刷卡金合计（自动抵扣本期应还）
+    var cycleCashback: Double {
+        let start = DateHelp.cal.startOfDay(for: cycleStart)
+        return cashbackList
+            .filter { DateHelp.cal.startOfDay(for: $0.date) >= start }
+            .reduce(0) { $0 + $1.amount }
+    }
+
+    var outstanding: Double { max(0, billTotal - paid - cycleCashback) }
 
     var isCleared: Bool { outstanding < 0.005 }
 
@@ -267,6 +318,14 @@ struct Earning: Identifiable, Codable, Hashable {
     var activityID: UUID
     var amount: Double
     var date: Date
+    var note: String = ""
+}
+
+/// 一笔刷卡金/返现收入（自动抵扣该卡本期应还）
+struct Cashback: Identifiable, Codable, Hashable {
+    var id = UUID()
+    var amount: Double
+    var date = Date()
     var note: String = ""
 }
 
@@ -748,6 +807,105 @@ final class Store: ObservableObject {
         guard let i = cards.firstIndex(where: { $0.id == cardID }) else { return }
         cards[i].items.insert(tx, at: 0)
         save()
+    }
+
+    // MARK: 刷卡金（返现收入）
+
+    /// 记一笔刷卡金：写入该卡记录并自动抵扣本期应还，返回抵扣后的应还金额
+    @discardableResult
+    func addCashback(cardID: UUID, amount: Double, note: String) -> Double? {
+        guard amount > 0,
+              let i = cards.firstIndex(where: { $0.id == cardID }) else { return nil }
+        let rec = Cashback(amount: amount, date: Date(), note: note)
+        cards[i].cashbacks = cards[i].cashbackList + [rec]
+        save()
+        return cards[i].outstanding
+    }
+
+    /// 删除一笔刷卡金，应还金额随之恢复
+    func deleteCashback(cardID: UUID, id: UUID) {
+        guard let i = cards.firstIndex(where: { $0.id == cardID }) else { return }
+        cards[i].cashbacks = cards[i].cashbackList.filter { $0.id != id }
+        save()
+    }
+
+    /// 全部刷卡金累计
+    var totalCashback: Double {
+        cards.reduce(0) { $0 + $1.cashbackList.reduce(0) { $0 + $1.amount } }
+    }
+
+    /// 本账单周期内刷卡金合计
+    var totalCycleCashback: Double {
+        cards.reduce(0) { $0 + $1.cycleCashback }
+    }
+
+    /// 按快捷指令给的线索找卡：先精确匹配尾号，再按卡名/银行/组织模糊匹配；只有一张卡时直接命中
+    func matchCard(_ query: String) -> CreditCard? {
+        let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return nil }
+        if cards.count == 1, q.count < 3 { return cards.first }
+        if let c = cards.first(where: { $0.last4 == q }) { return c }
+        let l = q.lowercased()
+        if let c = cards.first(where: {
+            $0.name.lowercased().contains(l)
+                || $0.bank.lowercased().contains(l)
+                || $0.org.lowercased().contains(l)
+                || ($0.bank + $0.name).lowercased().replacingOccurrences(of: " ", with: "").contains(l)
+        }) { return c }
+        return nil
+    }
+
+    /// 快捷指令记账：写流水 + 自动推进该卡未完成活动进度，返回进度提示文案
+    func recordFromShortcut(cardID: UUID, amount: Double, merchant: String, category: String) -> [String] {
+        var messages: [String] = []
+        guard amount > 0,
+              let i = cards.firstIndex(where: { $0.id == cardID }) else { return messages }
+
+        let name = merchant.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cat = category.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tx = Transaction(merchant: name.isEmpty ? "快捷记账" : name,
+                             category: cat.isEmpty ? guessCategory(name) : cat,
+                             amount: amount,
+                             date: Date())
+        cards[i].items.insert(tx, at: 0)
+
+        for j in activities.indices where activities[j].cardID == cardID && !activities[j].isDone {
+            let before = activities[j].value
+            if activities[j].kind == .amount {
+                activities[j].current += amount
+            } else if let k = activities[j].steps.firstIndex(where: { !$0.done }) {
+                activities[j].steps[k].done = true
+            }
+            guard activities[j].value > before + 0.0001 else { continue }
+            if activities[j].isDone {
+                messages.append("🎉 「" + activities[j].title + "」已达标")
+            } else {
+                messages.append("「" + activities[j].title + "」进度 " + activities[j].percentText
+                                + " · " + activities[j].remainText)
+            }
+        }
+        save()
+        return messages
+    }
+
+    /// 简单的商家关键词归类
+    func guessCategory(_ merchant: String) -> String {
+        let m = merchant.lowercased()
+        let table: [(keywords: [String], category: String)] = [
+            (["星巴克", "瑞幸", "咖啡", "奶茶", "喜茶", "茶百道", "luckin", "starbucks"], "餐饮"),
+            (["美团", "饿了么", "肯德基", "麦当劳", "必胜客", "外卖", "kfc", "mcdonald"], "餐饮"),
+            (["中石化", "中石油", "加油站", "加油", "壳牌"], "加油"),
+            (["京东", "淘宝", "天猫", "拼多多", "唯品会", "优衣库", "优衣库"], "购物"),
+            (["滴滴", "地铁", "公交", "12306", "铁路", "航空", "机票", "出租车", "高德"], "交通"),
+            (["万达", "影城", "影院", "猫眼", "淘票票", "电影", "cgv", "imi"], "娱乐"),
+            (["超市", "永辉", "盒马", "山姆", "沃尔玛", "costco", "华润万家"], "日用"),
+            (["医院", "药店", "药房", "挂号"], "医疗"),
+            (["话费", "移动", "联通", "电信", "水费", "电费", "燃气", "宽带"], "缴费"),
+        ]
+        for t in table where t.keywords.contains(where: { m.contains($0) }) {
+            return t.category
+        }
+        return "其他"
     }
 
     // MARK: 活动操作
