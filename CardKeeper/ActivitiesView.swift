@@ -13,6 +13,7 @@ struct ActivitiesView: View {
         case add
         case earnings
         case cashback
+        case quickAdd
 
         var id: String {
             switch self {
@@ -20,12 +21,15 @@ struct ActivitiesView: View {
             case .add: return "new-activity"
             case .earnings: return "earnings-list"
             case .cashback: return "record-cashback"
+            case .quickAdd: return "quick-add"
             }
         }
     }
 
     @State private var scope: Scope = .all
     @State private var sheet: Sheet?
+    /// 月份筛选：nil = 全部月份；默认当月，新的一月打开 App 自动跟随
+    @State private var monthFilter: String? = Store.currentMonthKey()
 
     var body: some View {
         ZStack {
@@ -45,9 +49,13 @@ struct ActivitiesView: View {
                         .padding(.horizontal, 20)
                         .padding(.top, 10)
 
+                    monthBar
+                        .padding(.horizontal, 20)
+                        .padding(.top, 14)
+
                     segmented
                         .padding(.horizontal, 20)
-                        .padding(.top, 20)
+                        .padding(.top, 12)
 
                     list
                         .padding(.horizontal, 20)
@@ -66,6 +74,8 @@ struct ActivitiesView: View {
                 EarningsListView().environmentObject(store)
             case .cashback:
                 CashbackRecordView().environmentObject(store)
+            case .quickAdd:
+                QuickAddActivitiesView().environmentObject(store)
             }
         }
     }
@@ -101,8 +111,14 @@ struct ActivitiesView: View {
 
     // MARK: 概览
 
-    private var doingCount: Int { store.activities.filter { !$0.isDone }.count }
-    private var doneCount: Int { store.activities.filter { $0.isDone }.count }
+    /// 当前月份筛选下的活动
+    private var monthActivities: [Activity] {
+        guard let key = monthFilter else { return store.activities }
+        return store.activities(inMonth: key)
+    }
+
+    private var doingCount: Int { monthActivities.filter { !$0.isDone }.count }
+    private var doneCount: Int { monthActivities.filter { $0.isDone }.count }
 
     private var statsRow: some View {
         HStack(spacing: 11) {
@@ -208,12 +224,84 @@ struct ActivitiesView: View {
         }
     }
 
-    private var nearestHint: String {        let pending = store.activities.filter { !$0.isDone }
+    private var nearestHint: String {        let pending = monthActivities.filter { !$0.isDone }
         guard let first = pending.min(by: { $0.deadline < $1.deadline }) else {
             return "暂无待办"
         }
         let left = max(0, DateHelp.daysToDeadline(first.deadline))
         return "最近截止剩 \(left) 天"
+    }
+
+    // MARK: 月份筛选
+
+    private var monthBar: some View {
+        HStack(spacing: 8) {
+            Button {
+                monthFilter = Store.monthKey(monthFilter ?? Store.currentMonthKey(), offsetBy: -1)
+            } label: {
+                Image(systemName: "chevron.left")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Palette.text)
+                    .frame(width: 30, height: 30)
+                    .background(Color(hex: "767680").opacity(0.10))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+
+            Menu {
+                Button("全部月份") { monthFilter = nil }
+                ForEach(store.visibleMonthKeys(), id: \.self) { key in
+                    Button(Store.monthLabel(key) + (key == Store.currentMonthKey() ? "（当月）" : "")) {
+                        monthFilter = key
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Text(monthFilter.map { Store.monthLabel($0) } ?? "全部月份")
+                        .font(.system(size: 13.5, weight: .semibold))
+                        .foregroundColor(Palette.text)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(Palette.sub)
+                }
+                .padding(.horizontal, 13)
+                .padding(.vertical, 7)
+                .background(Color(hex: "767680").opacity(0.10))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+
+            Button {
+                monthFilter = Store.monthKey(monthFilter ?? Store.currentMonthKey(), offsetBy: 1)
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundColor(Palette.text)
+                    .frame(width: 30, height: 30)
+                    .background(Color(hex: "767680").opacity(0.10))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Button {
+                sheet = .quickAdd
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "arrow.triangle.2.circlepath")
+                        .font(.system(size: 11.5, weight: .semibold))
+                        .foregroundColor(Palette.orange)
+                    Text("快捷添加")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Palette.text)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(Palette.orange.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
     }
 
     // MARK: 分段
@@ -242,7 +330,7 @@ struct ActivitiesView: View {
 
     private func scopeLabel(_ item: Scope) -> String {
         switch item {
-        case .all: return "全部 \(store.activities.count)"
+        case .all: return "全部 \(monthActivities.count)"
         case .doing: return "进行中 \(doingCount)"
         case .done: return "已完成 \(doneCount)"
         }
@@ -252,9 +340,9 @@ struct ActivitiesView: View {
 
     private var filtered: [Activity] {
         switch scope {
-        case .all: return store.activities
-        case .doing: return store.activities.filter { !$0.isDone }
-        case .done: return store.activities.filter { $0.isDone }
+        case .all: return monthActivities
+        case .doing: return monthActivities.filter { !$0.isDone }
+        case .done: return monthActivities.filter { $0.isDone }
         }
     }
 
@@ -904,7 +992,18 @@ struct ActivityEditorView: View {
 
     @State private var drafts: [Draft] = [Draft()]
     @State private var cardID: UUID?
-    @State private var deadline = Date().addingTimeInterval(86400 * 14)
+    /// 默认截止：当月最后一天 23:59，需要更久可以手动改
+    @State private var deadline = ActivityEditorView.endOfCurrentMonth()
+
+    static func endOfCurrentMonth() -> Date {
+        let cal = Calendar.current
+        guard let firstNext = cal.date(byAdding: .month, value: 1,
+                                       to: cal.date(from: cal.dateComponents([.year, .month], from: Date())) ?? Date()) else {
+            return Date()
+        }
+        let end = cal.date(byAdding: .day, value: -1, to: firstNext) ?? Date()
+        return cal.date(bySettingHour: 23, minute: 59, second: 0, of: end) ?? end
+    }
     @State private var remind: RemindRule = .weeklySunday
     @State private var alertAt = Date().addingTimeInterval(86400 * 2)
     @State private var leadMinutes = 10
@@ -1076,6 +1175,7 @@ struct ActivityEditorView: View {
             act.reward = Double(d.rewardText) ?? 0
             act.alertAt = (remind == .precise) ? alertAt : nil
             act.leadMinutes = (remind == .precise) ? leadMinutes : 0
+            act.periodMonth = store.monthKey(Date())
 
             store.activities.append(act)
             created += 1
@@ -1408,5 +1508,156 @@ struct CashbackRecordView: View {
         guard let card = selectedCard, amount > 0 else { return }
         beforeOutstanding = card.outstanding
         savedOutstanding = store.addCashback(cardID: card.id, amount: amount, note: note)
+    }
+}
+
+// MARK: - 快捷添加（从历史活动复制到指定月份）
+
+struct QuickAddActivitiesView: View {
+    @EnvironmentObject var store: Store
+    @Environment(\.dismiss) var dismiss
+
+    @State private var targetMonth: String = Store.currentMonthKey()
+    @State private var selected: Set<UUID> = []
+    @State private var justAdded = 0
+
+    /// 历史活动按月份倒序分组
+    private var monthSections: [(key: String, acts: [Activity])] {
+        var order: [String] = []
+        var map: [String: [Activity]] = [:]
+        for act in store.activities {
+            let key = store.displayMonthKey(act)
+            if map[key] == nil { order.append(key) }
+            map[key, default: []].append(act)
+        }
+        return order.sorted(by: >).map { ($0, map[$0]!.sorted { $0.deadline > $1.deadline }) }
+    }
+
+    /// 目标月份里已存在的「同卡同名」活动 key，避免重复添加
+    private var existingKeys: Set<String> {
+        Set(store.activities(inMonth: targetMonth).map { $0.cardID.uuidString + "|" + $0.title })
+    }
+
+    private func alreadyInMonth(_ act: Activity) -> Bool {
+        existingKeys.contains(act.cardID.uuidString + "|" + act.title)
+    }
+
+    private var selectableCount: Int {
+        store.activities.filter { !alreadyInMonth($0) }.count
+    }
+
+    var body: some View {
+        NavigationView {
+            Group {
+                if store.activities.isEmpty {
+                    Text("还没有历史活动。先手动添加一条，下个月就能一键复制。")
+                        .font(.system(size: 13))
+                        .foregroundColor(Palette.sub)
+                } else {
+                    List {
+                        Section {
+                            Picker("目标月份", selection: $targetMonth) {
+                                ForEach(store.visibleMonthKeys(), id: \.self) { key in
+                                    Text(Store.monthLabel(key) + (key == Store.currentMonthKey() ? "（当月）" : "")).tag(key)
+                                }
+                            }
+                        } footer: {
+                            Text("勾选以前添加过的活动，复制到目标月份：进度清零、到账清零、提醒规则保留；截止日已过的自动顺延到目标月末。同名活动本月已有则不可重复加。")
+                                .font(.system(size: 11.5))
+                        }
+
+                        if justAdded > 0 {
+                            Section {
+                                Text("已添加 \(justAdded) 条到\(Store.monthLabel(targetMonth))，去活动列表查看。")
+                                    .font(.system(size: 12.5))
+                                    .foregroundColor(Palette.green)
+                            }
+                        }
+
+                        ForEach(monthSections, id: \.key) { section in
+                            Section {
+                                ForEach(section.acts) { act in
+                                    let exists = alreadyInMonth(act)
+                                    Button {
+                                        if selected.contains(act.id) {
+                                            selected.remove(act.id)
+                                        } else {
+                                            selected.insert(act.id)
+                                        }
+                                    } label: {
+                                        HStack(spacing: 10) {
+                                            Image(systemName: selected.contains(act.id) ? "checkmark.circle.fill" : "circle")
+                                                .font(.system(size: 17))
+                                                .foregroundColor(selected.contains(act.id) ? Palette.green : Color(hex: "C2C2C8"))
+
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(act.title)
+                                                    .font(.system(size: 13.5))
+                                                    .foregroundColor(exists ? Palette.sub : Palette.text)
+                                                    .lineLimit(1)
+                                                Text(store.cardName(act.cardID) + " · "
+                                                     + (act.isDone ? "已完成" : act.remainText))
+                                                    .font(.system(size: 10.5))
+                                                    .foregroundColor(Palette.sub)
+                                                    .lineLimit(1)
+                                            }
+
+                                            Spacer()
+
+                                            if exists {
+                                                Text("本月已有")
+                                                    .font(.system(size: 10.5))
+                                                    .foregroundColor(Palette.sub)
+                                            }
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(exists)
+                                }
+                            } header: {
+                                Text(Store.monthLabel(section.key))
+                            }
+                        }
+                    }
+                    .listStyle(.insetGrouped)
+                }
+            }
+            .navigationTitle("快捷添加")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("关闭") { dismiss() }
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("全选可选") {
+                        selected = Set(store.activities.filter { !alreadyInMonth($0) }.map { $0.id })
+                    }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                if !store.activities.isEmpty {
+                    Button {
+                        justAdded = store.duplicateActivities(ids: Array(selected), toMonth: targetMonth)
+                        selected = []
+                        Notifier.shared.refresh(store: store)
+                    } label: {
+                        Text(justAdded > 0
+                             ? "完成"
+                             : "添加 \(selected.count) 条到\(Store.monthLabel(targetMonth))")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    }
+                    .background(selected.isEmpty && justAdded == 0 ? Palette.primaryButton.opacity(0.4) : Palette.primaryButton)
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    .disabled(selected.isEmpty && justAdded == 0)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(Palette.bg.opacity(0.9))
+                }
+            }
+        }
+        .navigationViewStyle(StackNavigationViewStyle())
     }
 }

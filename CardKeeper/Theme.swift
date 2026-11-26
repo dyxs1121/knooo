@@ -260,11 +260,37 @@ extension CardTheme {
 
 // MARK: - 卡面
 
+/// 照片卡面：给一行文字垫一块半透明深色底板，任何花色背景上都能读清
+struct PhotoChip: ViewModifier {
+    let enabled: Bool
+    let opacity: Double
+
+    func body(content: Content) -> some View {
+        Group {
+            if enabled {
+                content
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(RoundedRectangle(cornerRadius: 13, style: .continuous)
+                        .fill(Color.black.opacity(opacity)))
+            } else {
+                content
+            }
+        }
+    }
+}
+
 struct CardFace: View {
     var card: CreditCard
     var height: CGFloat = 180
     /// 附属卡时传入主卡标签（如「附属 · 招商 ••4832」），主卡传 nil
     var supplementaryLabel: String? = nil
+
+    /// 是否使用照片卡面
+    private var isPhoto: Bool {
+        guard let data = card.photoData else { return false }
+        return UIImage(data: data) != nil
+    }
 
     /// 背景：有自定义照片用照片（加暗化保证文字可读），否则用主题渐变
     private var backgroundLayer: AnyView {
@@ -284,20 +310,33 @@ struct CardFace: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             topRow
+                .modifier(PhotoChip(enabled: isPhoto, opacity: 0.34))
             Spacer(minLength: 6)
             middleRow
+                .modifier(PhotoChip(enabled: isPhoto, opacity: 0.30))
             Spacer(minLength: 6)
             bottomRow
+                .modifier(PhotoChip(enabled: isPhoto, opacity: 0.40))
         }
         .padding(17)
         .frame(height: height)
+        .shadow(color: isPhoto ? Color.black.opacity(0.45) : .clear, radius: 1, x: 0, y: 0)
+        .shadow(color: isPhoto ? Color.black.opacity(0.45) : .clear, radius: 3, x: 0, y: 1)
         .background(backgroundLayer)
         .overlay(
             Group {
-                // 照片卡面时叠一层暗色渐变，保证白色文字始终可读
+                // 照片卡面：只在文字区（顶部/底部）压暗色渐变，中部留亮展示卡面图案
                 if card.photoData != nil {
-                    LinearGradient(colors: [Color.black.opacity(0.32), Color.black.opacity(0.10)],
-                                   startPoint: .topLeading, endPoint: .bottomTrailing)
+                    VStack(spacing: 0) {
+                        LinearGradient(colors: [Color.black.opacity(0.66), Color.black.opacity(0.0)],
+                                       startPoint: .top, endPoint: .bottom)
+                            .frame(height: height * 0.40)
+                        Color.black.opacity(0.15)
+                        LinearGradient(colors: [Color.black.opacity(0.0), Color.black.opacity(0.78)],
+                                       startPoint: .top, endPoint: .bottom)
+                            .frame(height: height * 0.46)
+                    }
+                    .allowsHitTesting(false)
                 }
             }
         )
@@ -312,7 +351,8 @@ struct CardFace: View {
     private var topRow: some View {
         HStack(alignment: .top, spacing: 8) {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.white.opacity(0.16))
+                .fill(Color.white.opacity(0.22))
+                .background(Color.black.opacity(0.18))
                 .frame(width: 26, height: 26)
                 .overlay(
                     Text(String(card.short.prefix(1)))
@@ -326,7 +366,7 @@ struct CardFace: View {
                     .foregroundColor(.white)
                 Text(card.name)
                     .font(.system(size: 10))
-                    .foregroundColor(.white.opacity(0.55))
+                    .foregroundColor(.white.opacity(0.78))
             }
 
             Spacer()
@@ -354,7 +394,7 @@ struct CardFace: View {
         HStack(spacing: 8) {
             Text("•••• •••• •••• " + card.last4)
                 .font(.system(size: 12.5, weight: .medium))
-                .foregroundColor(.white.opacity(0.82))
+                .foregroundColor(.white.opacity(0.92))
                 .lineLimit(1)
                 .fixedSize()
 
@@ -365,7 +405,9 @@ struct CardFace: View {
                 .foregroundColor(card.isCleared ? Color(hex: "9BE8B4") : Color(hex: "FFCF8A"))
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
-                .background(card.isCleared ? Color(hex: "2CC15D").opacity(0.20) : Color(hex: "FF9F0A").opacity(0.20))
+                .background(Color.black.opacity(isPhoto ? 0.30 : 0))
+                .background(card.isCleared ? Color(hex: "2CC15D").opacity(isPhoto ? 0.42 : 0.20)
+                                           : Color(hex: "FF9F0A").opacity(isPhoto ? 0.42 : 0.20))
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .fixedSize()
         }
@@ -382,8 +424,8 @@ struct CardFace: View {
     private func infoCell(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label)
-                .font(.system(size: 9.5))
-                .foregroundColor(.white.opacity(0.5))
+                .font(.system(size: 9.5, weight: .medium))
+                .foregroundColor(.white.opacity(0.85))
             Text(value)
                 .font(.system(size: 12.5, weight: .semibold))
                 .foregroundColor(.white)

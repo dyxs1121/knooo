@@ -102,12 +102,14 @@ struct Activity: Identifiable, Codable, Hashable {
     var alertAt: Date? = nil
     /// 抢购提醒提前分钟数
     var leadMinutes: Int = 0
+    /// 活动所属月份（yyyy-MM），月份筛选与跨月快捷添加用；为空时按截止日所在月显示
+    var periodMonth: String? = nil
 
     // MARK: 兼容旧数据
 
     private enum CodingKeys: String, CodingKey {
         case id, cardID, title, detail, kind, target, current, deadline, remind, steps
-        case reward, earned, alertAt, leadMinutes
+        case reward, earned, alertAt, leadMinutes, periodMonth
     }
 
     init(cardID: UUID, title: String, detail: String, kind: ActivityKind, target: Double,
@@ -147,6 +149,7 @@ struct Activity: Identifiable, Codable, Hashable {
         earned = try c.decodeIfPresent(Double.self, forKey: .earned) ?? 0
         alertAt = try c.decodeIfPresent(Date.self, forKey: .alertAt)
         leadMinutes = try c.decodeIfPresent(Int.self, forKey: .leadMinutes) ?? 0
+        periodMonth = try c.decodeIfPresent(String.self, forKey: .periodMonth)
     }
 
     var doneCount: Int { steps.filter { $0.done }.count }
@@ -906,6 +909,93 @@ final class Store: ObservableObject {
             return t.category
         }
         return "其他"
+    }
+
+    // MARK: 活动月份
+
+    private static let monthFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM"
+        f.locale = Locale(identifier: "zh_CN")
+        return f
+    }()
+
+    static func currentMonthKey() -> String { monthFormatter.string(from: Date()) }
+
+    func monthKey(_ date: Date) -> String { Store.monthFormatter.string(from: date) }
+
+    /// 活动归属月份：优先取 periodMonth，旧数据回退到截止日所在月
+    func displayMonthKey(_ act: Activity) -> String {
+        act.periodMonth ?? monthKey(act.deadline)
+    }
+
+    /// 某月 yyyy-MM 的活动列表
+    func activities(inMonth key: String) -> [Activity] {
+        activities.filter { displayMonthKey($0) == key }
+    }
+
+    /// 月份中文标签：2026-11 → 2026年11月
+    static func monthLabel(_ key: String) -> String {
+        let parts = key.split(separator: "-")
+        guard parts.count == 2, let y = Int(parts[0]), let m = Int(parts[1]) else { return key }
+        return "\(y)年\(m)月"
+    }
+
+    /// 相邻月份 key（offset ±1）
+    static func monthKey(_ key: String, offsetBy offset: Int) -> String {
+        let parts = key.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 2 else { return key }
+        var c = DateComponents()
+        c.year = parts[0]; c.month = parts[1]; c.day = 1
+        guard let d = Calendar.current.date(from: c),
+              let shifted = Calendar.current.date(byAdding: .month, value: offset, to: d) else { return key }
+        return monthFormatter.string(from: shifted)
+    }
+
+    /// 可选月份列表：所有活动出现过的月份 + 当月 + 下月，倒序
+    func visibleMonthKeys() -> [String] {
+        var set = Set(activities.map { displayMonthKey($0) })
+        set.insert(Store.currentMonthKey())
+        set.insert(Store.monthKey(Store.currentMonthKey(), offsetBy: 1))
+        return set.sorted(by: >)
+    }
+
+    /// 把历史活动复制到目标月份：进度清零、到账清零、抢购提醒改为不提醒；
+    /// 原截止日已过的自动顺延到目标月份最后一天
+    @discardableResult
+    func duplicateActivities(ids: [UUID], toMonth key: String) -> Int {
+        var created = 0
+        for id in ids {
+            guard let src = activities.first(where: { $0.id == id }) else { continue }
+            var copy = src
+            copy.id = UUID()
+            copy.periodMonth = key
+            copy.current = 0
+            copy.steps = src.steps.map { step in
+                var s = step
+                s.id = UUID()
+                s.done = false
+                return s
+            }
+            copy.earned = 0
+            copy.alertAt = nil
+            if copy.remind == .precise { copy.remind = .none }
+
+            if copy.deadline < Date() {
+                let parts = key.split(separator: "-").compactMap { Int($0) }
+                if parts.count == 2 {
+                    var c = DateComponents()
+                    c.year = parts[0]; c.month = parts[1] + 1; c.day = 1; c.hour = 23; c.minute = 59
+                    if let firstNext = Calendar.current.date(from: c) {
+                        copy.deadline = Calendar.current.date(byAdding: .day, value: -1, to: firstNext) ?? copy.deadline
+                    }
+                }
+            }
+            activities.append(copy)
+            created += 1
+        }
+        if created > 0 { save() }
+        return created
     }
 
     // MARK: 活动操作

@@ -390,7 +390,7 @@ struct ProfileView: View {
                         Text("版本")
                             .font(.system(size: 14, weight: .medium))
                             .foregroundColor(Palette.text)
-                        Text("1.8 · 本地存储，数据不上传")
+                        Text("2.2 · 本地存储，数据不上传")
                             .font(.system(size: 11.5))
                             .foregroundColor(Palette.sub)
                     }
