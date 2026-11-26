@@ -234,6 +234,11 @@ struct ActivitiesView: View {
 
     // MARK: 月份筛选
 
+    private var currentMonthLabel: String {
+        guard let key = monthFilter else { return "全部月份" }
+        return Store.monthLabel(key)
+    }
+
     private var monthBar: some View {
         HStack(spacing: 8) {
             Button {
@@ -251,13 +256,13 @@ struct ActivitiesView: View {
             Menu {
                 Button("全部月份") { monthFilter = nil }
                 ForEach(store.visibleMonthKeys(), id: \.self) { key in
-                    Button(Store.monthLabel(key) + (key == Store.currentMonthKey() ? "（当月）" : "")) {
+                    Button(Store.monthOptionLabel(key)) {
                         monthFilter = key
                     }
                 }
             } label: {
                 HStack(spacing: 5) {
-                    Text(monthFilter.map { Store.monthLabel($0) } ?? "全部月份")
+                    Text(currentMonthLabel)
                         .font(.system(size: 13.5, weight: .semibold))
                         .foregroundColor(Palette.text)
                     Image(systemName: "chevron.down")
@@ -1521,6 +1526,78 @@ struct QuickAddActivitiesView: View {
     @State private var selected: Set<UUID> = []
     @State private var justAdded = 0
 
+    /// 单行：勾选圈 + 标题 + 卡片与进度
+    private func quickAddRow(_ act: Activity) -> some View {
+        let exists = alreadyInMonth(act)
+        let picked = selected.contains(act.id)
+        let titleColor = exists ? Palette.sub : Palette.text
+        let iconName = picked ? "checkmark.circle.fill" : "circle"
+        let iconColor = picked ? Palette.green : Color(hex: "C2C2C8")
+        let subtitle = rowSubtitle(act)
+
+        return Button {
+            if picked {
+                selected.remove(act.id)
+            } else {
+                selected.insert(act.id)
+            }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: iconName)
+                    .font(.system(size: 17))
+                    .foregroundColor(iconColor)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(act.title)
+                        .font(.system(size: 13.5))
+                        .foregroundColor(titleColor)
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(.system(size: 10.5))
+                        .foregroundColor(Palette.sub)
+                        .lineLimit(1)
+                }
+
+                Spacer()
+
+                if exists {
+                    Text("本月已有")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(Palette.sub)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .disabled(exists)
+    }
+
+    /// 卡片名 + 进度文案（拆开写，避免长表达式拖慢类型检查）
+    private func rowSubtitle(_ act: Activity) -> String {
+        let cardName = store.cardName(act.cardID)
+        let status = act.isDone ? "已完成" : act.remainText
+        return cardName + " · " + status
+    }
+
+    private var addedTip: String {
+        let month = Store.monthLabel(targetMonth)
+        return "已添加 \(justAdded) 条到" + month + "，去活动列表查看。"
+    }
+
+    private var canAdd: Bool { !selected.isEmpty || justAdded > 0 }
+
+    private var addButtonTitle: String {
+        if justAdded > 0 { return "完成" }
+        let month = Store.monthLabel(targetMonth)
+        return "添加 \(selected.count) 条到" + month
+    }
+
+    private func addSelected() {
+        let ids = Array(selected)
+        justAdded = store.duplicateActivities(ids: ids, toMonth: targetMonth)
+        selected = []
+        Notifier.shared.refresh(store: store)
+    }
+
     /// 历史活动按月份倒序分组
     private var monthSections: [(key: String, acts: [Activity])] {
         var order: [String] = []
@@ -1558,7 +1635,7 @@ struct QuickAddActivitiesView: View {
                         Section {
                             Picker("目标月份", selection: $targetMonth) {
                                 ForEach(store.visibleMonthKeys(), id: \.self) { key in
-                                    Text(Store.monthLabel(key) + (key == Store.currentMonthKey() ? "（当月）" : "")).tag(key)
+                                    Text(Store.monthOptionLabel(key)).tag(key)
                                 }
                             }
                         } footer: {
@@ -1568,7 +1645,7 @@ struct QuickAddActivitiesView: View {
 
                         if justAdded > 0 {
                             Section {
-                                Text("已添加 \(justAdded) 条到\(Store.monthLabel(targetMonth))，去活动列表查看。")
+                                Text(addedTip)
                                     .font(.system(size: 12.5))
                                     .foregroundColor(Palette.green)
                             }
@@ -1577,42 +1654,7 @@ struct QuickAddActivitiesView: View {
                         ForEach(monthSections, id: \.key) { section in
                             Section {
                                 ForEach(section.acts) { act in
-                                    let exists = alreadyInMonth(act)
-                                    Button {
-                                        if selected.contains(act.id) {
-                                            selected.remove(act.id)
-                                        } else {
-                                            selected.insert(act.id)
-                                        }
-                                    } label: {
-                                        HStack(spacing: 10) {
-                                            Image(systemName: selected.contains(act.id) ? "checkmark.circle.fill" : "circle")
-                                                .font(.system(size: 17))
-                                                .foregroundColor(selected.contains(act.id) ? Palette.green : Color(hex: "C2C2C8"))
-
-                                            VStack(alignment: .leading, spacing: 2) {
-                                                Text(act.title)
-                                                    .font(.system(size: 13.5))
-                                                    .foregroundColor(exists ? Palette.sub : Palette.text)
-                                                    .lineLimit(1)
-                                                Text(store.cardName(act.cardID) + " · "
-                                                     + (act.isDone ? "已完成" : act.remainText))
-                                                    .font(.system(size: 10.5))
-                                                    .foregroundColor(Palette.sub)
-                                                    .lineLimit(1)
-                                            }
-
-                                            Spacer()
-
-                                            if exists {
-                                                Text("本月已有")
-                                                    .font(.system(size: 10.5))
-                                                    .foregroundColor(Palette.sub)
-                                            }
-                                        }
-                                    }
-                                    .buttonStyle(.plain)
-                                    .disabled(exists)
+                                    quickAddRow(act)
                                 }
                             } header: {
                                 Text(Store.monthLabel(section.key))
@@ -1637,21 +1679,17 @@ struct QuickAddActivitiesView: View {
             .safeAreaInset(edge: .bottom) {
                 if !store.activities.isEmpty {
                     Button {
-                        justAdded = store.duplicateActivities(ids: Array(selected), toMonth: targetMonth)
-                        selected = []
-                        Notifier.shared.refresh(store: store)
+                        addSelected()
                     } label: {
-                        Text(justAdded > 0
-                             ? "完成"
-                             : "添加 \(selected.count) 条到\(Store.monthLabel(targetMonth))")
+                        Text(addButtonTitle)
                             .font(.system(size: 15, weight: .semibold))
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 12)
                     }
-                    .background(selected.isEmpty && justAdded == 0 ? Palette.primaryButton.opacity(0.4) : Palette.primaryButton)
+                    .background(Palette.primaryButton.opacity(canAdd ? 1 : 0.4))
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    .disabled(selected.isEmpty && justAdded == 0)
+                    .disabled(!canAdd)
                     .padding(.horizontal, 20)
                     .padding(.vertical, 10)
                     .background(Palette.bg.opacity(0.9))

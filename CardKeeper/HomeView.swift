@@ -220,7 +220,7 @@ struct HomeView: View {
             }
             .buttonStyle(.plain)
 
-            Text("卡管家 v2.2")
+            Text("卡管家 v2.3")
                 .font(.system(size: 10))
                 .foregroundColor(.white.opacity(0.28))
                 .padding(.horizontal, 20)

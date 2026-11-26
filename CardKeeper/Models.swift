@@ -941,6 +941,13 @@ final class Store: ObservableObject {
         return "\(y)年\(m)月"
     }
 
+    /// 月份选项文案：2026年11月（当月）
+    static func monthOptionLabel(_ key: String) -> String {
+        let base = monthLabel(key)
+        if key == currentMonthKey() { return base + "（当月）" }
+        return base
+    }
+
     /// 相邻月份 key（offset ±1）
     static func monthKey(_ key: String, offsetBy offset: Int) -> String {
         let parts = key.split(separator: "-").compactMap { Int($0) }
